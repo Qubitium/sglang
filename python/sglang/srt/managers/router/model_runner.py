@@ -263,6 +263,9 @@ class ModelRunner:
         global global_server_args_dict
         global_server_args_dict = server_args_dict
 
+        os.environ["MASTER_ADDRESS"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(self.nccl_port)
+
         # Init torch distributed
         torch.cuda.set_device(self.tp_rank)
         print(f"Starting torch.distributed.init_process_group at tcp://0.0.0.0:{self.nccl_port}")
@@ -270,7 +273,7 @@ class ModelRunner:
             backend="gloo",
             world_size=self.tp_size,
             rank=self.tp_rank,
-            init_method=f"tcp://127.0.0.1:{self.nccl_port}",
+            # init_method=f"tcp://127.0.0.1:{self.nccl_port}",
         )
 
         # A small all_reduce for warmup.
