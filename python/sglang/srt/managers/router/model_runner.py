@@ -264,7 +264,7 @@ class ModelRunner:
         global global_server_args_dict
         global_server_args_dict = server_args_dict
 
-        os.environ["MASTER_ADDR] = "127.0.0.1"
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(self.nccl_port)
 
         # Init torch distributed
