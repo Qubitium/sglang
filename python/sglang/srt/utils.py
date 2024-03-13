@@ -90,7 +90,7 @@ def alloc_usable_network_port(num, used_list=()):
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("", port))
+                s.bind(("0.0.0.0", port))
                 port_list.append(port)
             except socket.error:
                 pass
