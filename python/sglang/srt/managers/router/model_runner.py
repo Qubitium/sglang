@@ -265,11 +265,12 @@ class ModelRunner:
 
         # Init torch distributed
         torch.cuda.set_device(self.tp_rank)
+        print(f"Starting torch.distributed.init_process_group at tcp://0.0.0.0:{self.nccl_port}")
         torch.distributed.init_process_group(
             backend="nccl",
             world_size=self.tp_size,
             rank=self.tp_rank,
-            init_method=f"tcp://127.0.0.1:{self.nccl_port}",
+            init_method=f"tcp://0.0.0.0:{self.nccl_port}",
         )
 
         # A small all_reduce for warmup.
