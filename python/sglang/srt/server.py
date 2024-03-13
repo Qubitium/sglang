@@ -425,6 +425,7 @@ def launch_server(server_args, pipe_finish_writer):
         server_args.port, server_args.additional_ports, server_args.tp_size
     )
 
+    print(f"server_args.additional_ports: {server_args.additional_ports}")
     port_args = PortArgs(
         tokenizer_port=server_args.additional_ports[0],
         router_port=server_args.additional_ports[1],
@@ -432,6 +433,8 @@ def launch_server(server_args, pipe_finish_writer):
         nccl_port=server_args.additional_ports[3],
         model_rpc_ports=server_args.additional_ports[4:],
     )
+
+    print(f"port_args: {port_args}")
 
     # Load chat template if needed
     if server_args.chat_template is not None:
@@ -467,10 +470,12 @@ def launch_server(server_args, pipe_finish_writer):
             chat_template_name = server_args.chat_template
 
     # Launch processes
+    print(f"Lanching tokenizer manager")
     tokenizer_manager = TokenizerManager(server_args, port_args)
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
 
+    print(f"Lanching router")
     proc_router = mp.Process(
         target=start_router_process,
         args=(
@@ -480,6 +485,8 @@ def launch_server(server_args, pipe_finish_writer):
         ),
     )
     proc_router.start()
+
+    print(f"Lanching start_detokenizer_process manager")
     proc_detoken = mp.Process(
         target=start_detokenizer_process,
         args=(
