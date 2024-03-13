@@ -92,7 +92,8 @@ def alloc_usable_network_port(num, used_list=()):
             try:
                 s.bind(("0.0.0.0", port))
                 port_list.append(port)
-            except socket.error:
+            except socket.error as e:
+                print(e)
                 pass
 
             if len(port_list) == num:
@@ -103,10 +104,11 @@ def alloc_usable_network_port(num, used_list=()):
 def check_port(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("", port))
+            s.setsockopt(socket.SOL_TCP, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", port))
             return True
-        except socket.error:
+        except socket.error as e:
+            print(e)
             return False
 
 
