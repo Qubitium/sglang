@@ -84,7 +84,7 @@ def set_random_seed(seed: int) -> None:
 
 def alloc_usable_network_port(num, used_list=()):
     port_list = []
-    for port in range(10000, 65536):
+    for port in range(8000, 65536):
         if port in used_list:
             continue
 
