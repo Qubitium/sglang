@@ -32,6 +32,11 @@ class RouterManager:
         self.extend_dependency_time = GLOBAL_BACKEND_CONFIG.extend_dependency_time
 
     async def loop_for_forward(self):
+        # hack?
+        out_pyobjs = await self.model_client.step([])
+        for obj in out_pyobjs:
+            self.send_to_detokenizer.send_pyobj(obj)
+
         while True:
             next_step_input = [await self.recv_reqs.get()]
             # flush queue
