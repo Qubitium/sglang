@@ -26,36 +26,35 @@ class RouterManager:
 
         # Init status
         self.model_client = model_client
-        self.recv_reqs = []
+        self.recv_reqs = asyncio.Queue()
 
         # Init some configs
         self.extend_dependency_time = GLOBAL_BACKEND_CONFIG.extend_dependency_time
 
     async def loop_for_forward(self):
         while True:
-            next_step_input = list(self.recv_reqs)
-            self.recv_reqs = []
+            next_step_input = [await self.recv_reqs.get()]
+            # flush queue
+            while self.recv_reqs.qsize() > 0:
+                next_step_input.append(await self.recv_reqs.get())
+
             out_pyobjs = await self.model_client.step(next_step_input)
 
             for obj in out_pyobjs:
                 self.send_to_detokenizer.send_pyobj(obj)
 
             # async sleep for receiving the subsequent request and avoiding cache miss
-            slept = False
             if len(out_pyobjs) != 0:
                 has_finished = any([obj.finished for obj in out_pyobjs])
                 if has_finished:
                     if self.extend_dependency_time > 0:
-                        slept = True
                         await asyncio.sleep(self.extend_dependency_time)
 
-            if not slept:
-                await asyncio.sleep(0.0006)
 
     async def loop_for_recv_requests(self):
         while True:
             recv_req = await self.recv_from_tokenizer.recv_pyobj()
-            self.recv_reqs.append(recv_req)
+            self.recv_reqs.put_nowait(recv_req)
 
 
 def start_router_process(
