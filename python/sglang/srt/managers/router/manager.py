@@ -9,7 +9,7 @@ from sglang.srt.managers.router.model_rpc import ModelRpcClient
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
 
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+# asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 
 class RouterManager:
@@ -75,6 +75,9 @@ def start_router_process(
         format="%(message)s",
     )
 
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     try:
         model_client = ModelRpcClient(server_args, port_args)
         router = RouterManager(model_client, port_args)
@@ -84,7 +87,5 @@ def start_router_process(
 
     pipe_writer.send("init ok")
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     loop.create_task(router.loop_for_recv_requests())
     loop.run_until_complete(router.loop_for_forward())
