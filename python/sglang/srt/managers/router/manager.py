@@ -32,11 +32,10 @@ class RouterManager:
         self.extend_dependency_time = GLOBAL_BACKEND_CONFIG.extend_dependency_time
 
     async def loop_for_forward(self):
-        # hack?
-        await asyncio.sleep(1)
-
         while True:
+            print(f"LBX loop_for_forward waiting for req")
             next_step_input = [await self.recv_reqs.get()]
+            print(f"LBX loop_for_forward got next_step_input")
             # flush queue
             while self.recv_reqs.qsize() > 0:
                 try:
@@ -60,8 +59,10 @@ class RouterManager:
 
     async def loop_for_recv_requests(self):
         while True:
+            print(f"LBX loop_for_recv_requests waing for request")
             recv_req = await self.recv_from_tokenizer.recv_pyobj()
-            self.recv_reqs.put_nowait(recv_req)
+            print(f"LBX loop_for_recv_requests got request! {recv_req}")
+            await self.recv_reqs.put(recv_req)
 
 
 def start_router_process(
