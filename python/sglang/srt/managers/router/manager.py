@@ -36,7 +36,11 @@ class RouterManager:
             next_step_input = [await self.recv_reqs.get()]
             # flush queue
             while self.recv_reqs.qsize() > 0:
-                next_step_input.append(await self.recv_reqs.get())
+                try:
+                    next_step_input.append(self.recv_reqs.get_nowait())
+                # this should never happen
+                except asyncio.QueueEmpty:
+                    break
 
             out_pyobjs = await self.model_client.step(next_step_input)
 
