@@ -83,7 +83,6 @@ app = FastAPI()
 tokenizer_manager = None
 chat_template_name = None
 
-
 # FIXME: Remove this once we drop support for pydantic 1.x
 IS_PYDANTIC_1 = int(pydantic.VERSION.split(".")[0]) == 1
 
@@ -478,6 +477,9 @@ def launch_server(server_args, pipe_finish_writer):
             port_args,
             pipe_router_writer,
         ),
+        kwargs={
+            "next_request_delay": 0.005,
+        }
     )
     proc_router.start()
     proc_detoken = mp.Process(
