@@ -124,16 +124,16 @@ async def flush_cache():
     )
 
 
-async def detokenize_logprob_tokens(token_logprobs):
+def detokenize_logprob_tokens(token_logprobs):
     token_ids = [tid for tid, _ in token_logprobs]
-    token_texts = await tokenizer_manager.detokenize(DetokenizeReqInput(token_ids))
+    token_texts = tokenizer_manager.detokenize(DetokenizeReqInput(token_ids))
     return [(text, logprob) for text, (_, logprob) in zip(token_texts, token_logprobs)]
 
 
 async def stream_generator(obj: GenerateReqInput):
     async for out in tokenizer_manager.generate_request(obj):
         if obj.return_logprob and obj.return_text_in_logprobs:
-            out["meta_info"]["token_logprob"] = await detokenize_logprob_tokens(
+            out["meta_info"]["token_logprob"] = detokenize_logprob_tokens(
                 out["meta_info"]["token_logprob"]
             )
         yield out

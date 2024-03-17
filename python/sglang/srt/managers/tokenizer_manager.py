@@ -28,6 +28,7 @@ from sglang.srt.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_image
 
+
 @dataclasses.dataclass
 class ReqState:
     out_list: List
@@ -50,7 +51,7 @@ def init_global_processor(server_args: ServerArgs):
 
 
 def get_pixel_values(
-    image_data, image_aspect_ratio=None, image_grid_pinpoints=None, processor=None
+        image_data, image_aspect_ratio=None, image_grid_pinpoints=None, processor=None
 ):
     try:
         processor = processor or global_processor
@@ -75,10 +76,10 @@ def get_pixel_values(
 
 class TokenizerManager:
     def __init__(
-        self,
-        server_args: ServerArgs,
-        tokenizer_chan: multiprocessing.Queue,
-        router_chan: multiprocessing.Queue,
+            self,
+            server_args: ServerArgs,
+            tokenizer_chan: multiprocessing.Queue,
+            router_chan: multiprocessing.Queue,
     ):
         self.server_args = server_args
         self.tokenizer_chan = tokenizer_chan
@@ -251,7 +252,7 @@ class TokenizerManager:
 
             yield output_list
 
-    async def detokenize(self, obj: DetokenizeReqInput):
+    def detokenize(self, obj: DetokenizeReqInput):
         token_texts = self.tokenizer.convert_ids_to_tokens(obj.input_ids)
         return [t.decode() if isinstance(t, bytes) else t for t in token_texts]
 
@@ -268,20 +269,17 @@ class TokenizerManager:
             recv_obj = self.tokenizer_chan.get()
             # print(f"tokenizer manager tokenizer_chan get done: {recv_obj}")
 
-            if isinstance(recv_obj, BatchStrOut):
-                for i, rid in enumerate(recv_obj.rids):
-                    recv_obj.meta_info[i]["id"] = rid
-                    out_dict = {
-                        "text": recv_obj.output_str[i],
-                        "meta_info": recv_obj.meta_info[i],
-                    }
-                    with self.lock:
-                        state = self.rid_to_state[rid]
+            for i, rid in enumerate(recv_obj.rids):
+                recv_obj.meta_info[i]["id"] = rid
+                out_dict = {
+                    "text": recv_obj.output_str[i],
+                    "meta_info": recv_obj.meta_info[i],
+                }
+                with self.lock:
+                    state = self.rid_to_state[rid]
 
-                    state.out_list.append(out_dict)
-                    state.finished = recv_obj.finished[i]
-                    # print(f"tokenizer state.event.set ready rid: {rid}")
-                    state.event.set()
-                    # print(f"tokenizer state.event.set ready done rid: {rid}")
-            else:
-                raise ValueError(f"Invalid object: {recv_obj}")
+                state.out_list.append(out_dict)
+                state.finished = recv_obj.finished[i]
+                # print(f"tokenizer state.event.set ready rid: {rid}")
+                state.event.set()
+                # print(f"tokenizer state.event.set ready done rid: {rid}")
