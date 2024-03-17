@@ -5,6 +5,7 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
 from sglang.srt.utils import make_async_thread
 
+
 class DetokenizerManager:
     def __init__(
         self,
@@ -14,13 +15,6 @@ class DetokenizerManager:
     ):
         self.detokenizer_chan = detokenizer_chan
         self.tokenizer_chan = tokenizer_chan
-
-        # context = zmq.asyncio.Context(2)
-        # self.recv_from_router = context.socket(zmq.PULL)
-        # self.recv_from_router.bind(f"tcp://127.0.0.1:{port_args.detokenizer_port}")
-
-        # self.send_to_tokenizer = context.socket(zmq.PUSH)
-        # self.send_to_tokenizer.connect(f"tcp://127.0.0.1:{port_args.tokenizer_port}")
 
         self.tokenizer = get_tokenizer(
             server_args.tokenizer_path,
@@ -84,12 +78,12 @@ def start_detokenizer_process(
     server_args: ServerArgs,
     detokenizer_chan: multiprocessing.Queue,
     tokenizer_chan: multiprocessing.Queue,
-    pipe_writer,
+    startup_chan: multiprocessing.Queue,
 ):
     try:
         manager = DetokenizerManager(server_args, detokenizer_chan, tokenizer_chan)
     except Exception as e:
-        pipe_writer.send(get_exception_traceback())
+        startup_chan.put_nowait(get_exception_traceback())
         raise
-    pipe_writer.send("init ok")
+    startup_chan.put_nowait("init ok")
     manager.handle_loop()

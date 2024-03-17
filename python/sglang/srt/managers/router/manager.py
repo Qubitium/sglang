@@ -73,7 +73,7 @@ def start_router_process(
     port_args: PortArgs,
     router_chan: multiprocessing.Queue,
     detokenizer_chan: multiprocessing.Queue,
-    pipe_writer,
+    startup_chan: multiprocessing.Queue,
 ):
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
@@ -84,13 +84,13 @@ def start_router_process(
         model_client = ModelRpcClient(server_args, port_args)
         router = RouterManager(model_client, router_chan, detokenizer_chan)
     except Exception:
-        pipe_writer.send(get_exception_traceback())
+        startup_chan.put_nowait(get_exception_traceback())
         raise
 
-    pipe_writer.send("init ok")
+    startup_chan.put_nowait("init ok")
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    #loop = asyncio.new_event_loop()
+    #asyncio.set_event_loop(loop)
     # loop.create_task(router.loop_for_recv_requests())
     threading.Thread(target=router.loop_for_recv_requests, daemon=True).start()
     router.loop_for_forward()

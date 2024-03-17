@@ -471,10 +471,10 @@ def launch_server(server_args, pipe_finish_writer):
     detokenizer_chan = mp.Queue()
     tokenizer_chan = mp.Queue()
 
+    startup_chan = mp.Queue()
+
     # Launch processes
     tokenizer_manager = TokenizerManager(server_args, tokenizer_chan, router_chan)
-    pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
-    pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
 
     proc_router = mp.Process(
         target=start_router_process,
@@ -483,7 +483,7 @@ def launch_server(server_args, pipe_finish_writer):
             port_args,
             router_chan,
             detokenizer_chan,
-            pipe_router_writer,
+            startup_chan,
         ),
     )
     proc_router.start()
@@ -493,14 +493,14 @@ def launch_server(server_args, pipe_finish_writer):
             server_args,
             detokenizer_chan,
             tokenizer_chan,
-            pipe_detoken_writer,
+            startup_chan,
         ),
     )
     proc_detoken.start()
 
     # Wait for the model to finish loading
-    router_init_state = pipe_router_reader.recv()
-    detoken_init_state = pipe_detoken_reader.recv()
+    router_init_state = startup_chan.get()
+    detoken_init_state = startup_chan.get()
 
     if router_init_state != "init ok" or detoken_init_state != "init ok":
         proc_router.kill()
