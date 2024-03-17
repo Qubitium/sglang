@@ -1,12 +1,13 @@
 import asyncio
+import multiprocessing
+import threading
 
 import uvloop
-import zmq
-import zmq.asyncio
 from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.io_struct import BatchStrOut, BatchTokenIDOut
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
+from sglang.srt.utils import make_async_thread
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -15,14 +16,18 @@ class DetokenizerManager:
     def __init__(
         self,
         server_args: ServerArgs,
-        port_args: PortArgs,
+        detokenizer_chan: multiprocessing.Queue,
+        tokenizer_chan: multiprocessing.Queue,
     ):
-        context = zmq.asyncio.Context(2)
-        self.recv_from_router = context.socket(zmq.PULL)
-        self.recv_from_router.bind(f"tcp://127.0.0.1:{port_args.detokenizer_port}")
+        self.detokenizer_chan = detokenizer_chan
+        self.tokenizer_chan = tokenizer_chan
 
-        self.send_to_tokenizer = context.socket(zmq.PUSH)
-        self.send_to_tokenizer.connect(f"tcp://127.0.0.1:{port_args.tokenizer_port}")
+        # context = zmq.asyncio.Context(2)
+        # self.recv_from_router = context.socket(zmq.PULL)
+        # self.recv_from_router.bind(f"tcp://127.0.0.1:{port_args.detokenizer_port}")
+
+        # self.send_to_tokenizer = context.socket(zmq.PUSH)
+        # self.send_to_tokenizer.connect(f"tcp://127.0.0.1:{port_args.tokenizer_port}")
 
         self.tokenizer = get_tokenizer(
             server_args.tokenizer_path,
@@ -30,9 +35,13 @@ class DetokenizerManager:
             trust_remote_code=server_args.trust_remote_code,
         )
 
-    async def handle_loop(self):
+    def handle_loop(self):
+        detokenizer_get = make_async_thread(self.detokenizer_chan.get)
+
         while True:
-            recv_obj = await self.recv_from_router.recv_pyobj()
+            print(f"detokenizer detokenizer_chan get wait...")
+            recv_obj = self.detokenizer_chan.get()
+            print(f"detokenizer detokenizer_chan get done: {recv_obj}")
 
             if isinstance(recv_obj, BatchTokenIDOut):
                 output_tokens = recv_obj.output_tokens
@@ -64,7 +73,8 @@ class DetokenizerManager:
                         recv_obj.output_and_jump_forward_strs[i] + output_strs[i]
                     )
 
-                self.send_to_tokenizer.send_pyobj(
+                print(f"detokenizer tokenizer_chan put")
+                self.tokenizer_chan.put_nowait(
                     BatchStrOut(
                         recv_obj.rids,
                         output_strs,
@@ -72,20 +82,23 @@ class DetokenizerManager:
                         recv_obj.finished,
                     )
                 )
+                print(f"detokenizer tokenizer_chan put done")
             else:
                 raise ValueError(f"Invalid object: {recv_obj}")
 
 
 def start_detokenizer_process(
     server_args: ServerArgs,
-    port_args: PortArgs,
+    detokenizer_chan: multiprocessing.Queue,
+    tokenizer_chan: multiprocessing.Queue,
     pipe_writer,
 ):
     try:
-        manager = DetokenizerManager(server_args, port_args)
+        manager = DetokenizerManager(server_args, detokenizer_chan, tokenizer_chan)
     except Exception as e:
         pipe_writer.send(get_exception_traceback())
         raise
     pipe_writer.send("init ok")
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(manager.handle_loop())
+    #loop = asyncio.get_event_loop()
+    #loop.run_until_complete(manager.handle_loop())
+    manager.handle_loop()

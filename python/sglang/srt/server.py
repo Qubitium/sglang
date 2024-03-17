@@ -12,6 +12,7 @@ from typing import List, Optional, Union
 
 # Fix a Python bug
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
+mp.set_start_method('spawn', force=True)
 
 import aiohttp
 import psutil
@@ -466,8 +467,12 @@ def launch_server(server_args, pipe_finish_writer):
         else:
             chat_template_name = server_args.chat_template
 
+    router_chan = mp.Queue()
+    detokenizer_chan = mp.Queue()
+    tokenizer_chan = mp.Queue()
+
     # Launch processes
-    tokenizer_manager = TokenizerManager(server_args, port_args)
+    tokenizer_manager = TokenizerManager(server_args, tokenizer_chan, router_chan)
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
 
@@ -476,6 +481,8 @@ def launch_server(server_args, pipe_finish_writer):
         args=(
             server_args,
             port_args,
+            router_chan,
+            detokenizer_chan,
             pipe_router_writer,
         ),
     )
@@ -484,7 +491,8 @@ def launch_server(server_args, pipe_finish_writer):
         target=start_detokenizer_process,
         args=(
             server_args,
-            port_args,
+            detokenizer_chan,
+            tokenizer_chan,
             pipe_detoken_writer,
         ),
     )
@@ -563,7 +571,7 @@ def launch_server(server_args, pipe_finish_writer):
         if pipe_finish_writer is not None:
             pipe_finish_writer.send("init ok")
 
-    t = threading.Thread(target=_wait_and_warmup)
+    t = threading.Thread(target=_wait_and_warmup, daemon=True)
     t.start()
     try:
         _launch_server()

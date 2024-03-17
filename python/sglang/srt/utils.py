@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import os
 import random
@@ -7,14 +8,42 @@ import time
 import traceback
 from io import BytesIO
 from typing import List, Optional
-
 import numpy as np
 import requests
 import torch
 import torch.distributed as dist
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from typing import (
+    Awaitable,
+    Callable,
+    TypeVar,
+)
 
 is_show_cost_time = False
 
+
+
+T = TypeVar("T")
+THREAD_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="manager")
+
+def make_async_thread(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
+    """Take a blocking function, and run it on in an executor thread.
+
+    This function prevents the blocking function from blocking the
+    asyncio event loop.
+    The code in this function needs to be thread safe.
+    """
+
+    def _async_wrapper(*args, **kwargs) -> asyncio.Future:
+        p_func = partial(func, *args, **kwargs)
+
+        # executor set to None means using thread pool from eventloop
+        return asyncio.get_event_loop().run_in_executor(executor=THREAD_EXECUTOR, func=p_func)
+
+    return _async_wrapper
 
 def mark_cost_time(func_name):
     def inner_func(func):
