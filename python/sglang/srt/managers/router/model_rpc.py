@@ -625,7 +625,8 @@ class ModelRpcClient:
 
                 return _func
 
-            self.step = async_wrap(self.model_server.exposed_step)
+            # self.step = async_wrap(self.model_server.exposed_step)
+            self.step = self.model_server.exposed_step
         else:
             with ThreadPoolExecutor(tp_size) as executor:
                 # Launch model processes
@@ -650,7 +651,7 @@ class ModelRpcClient:
 
                 return _func
 
-            self.step = async_wrap("step")
+            # self.step = async_wrap("step")
 
 
 def _init_service(port):

@@ -28,9 +28,6 @@ from sglang.srt.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_image
 
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-
-
 @dataclasses.dataclass
 class ReqState:
     out_list: List
@@ -88,13 +85,6 @@ class TokenizerManager:
         self.router_chan = router_chan
 
         self.lock = threading.Lock()
-
-        # context = zmq.asyncio.Context(2)
-        # self.recv_from_detokenizer = context.socket(zmq.PULL)
-        # self.recv_from_detokenizer.bind(f"tcp://127.0.0.1:{port_args.tokenizer_port}")
-
-        # self.send_to_router = context.socket(zmq.PUSH)
-        # self.send_to_router.connect(f"tcp://127.0.0.1:{port_args.router_port}")
 
         self.model_path = server_args.model_path
         self.hf_config = get_config(
@@ -155,7 +145,7 @@ class TokenizerManager:
         is_single = isinstance(obj.text, str)
 
         if is_single:
-            print(f"tokenizer generate_request single request")
+            # print(f"tokenizer generate_request single request")
             rid = obj.rid
             input_ids = self.tokenizer.encode(obj.text)
             sampling_params = SamplingParams(**obj.sampling_params)
@@ -192,13 +182,13 @@ class TokenizerManager:
             with self.lock:
                 self.rid_to_state[rid] = state
 
-            #self.send_to_router.send_pyobj(tokenized_obj)
+            # self.send_to_router.send_pyobj(tokenized_obj)
             self.router_chan.put_nowait(tokenized_obj)
 
             while True:
-                print(f"tokenizer generate request single wait for event rid: {rid}")
+                # print(f"tokenizer generate request single wait for event rid: {rid}")
                 await event.wait()
-                print(f"tokenizer generate request single wait for event done rid: {rid}")
+                # print(f"tokenizer generate request single wait for event done rid: {rid}")
                 yield state.out_list[-1]
                 state.out_list = []
                 if state.finished:
@@ -207,7 +197,7 @@ class TokenizerManager:
                     break
                 event.clear()
         else:
-            print(f"tokenizer generate_request multiple request")
+            # print(f"tokenizer generate_request multiple request")
             assert obj.stream is False
             bs = len(obj.text)
             for i in range(bs):
@@ -236,9 +226,9 @@ class TokenizerManager:
                     stream=obj.stream,
                 )
                 # self.send_to_router.send_pyobj(tokenized_obj)
-                print(f"tokenizer generate_request router_chan put")
+                # print(f"tokenizer generate_request router_chan put")
                 self.router_chan.put_nowait(tokenized_obj)
-                print(f"tokenizer generate_request router_chan put done")
+                # print(f"tokenizer generate_request router_chan put done")
 
                 lock = asyncio.Lock()
                 event = asyncio.Event()
@@ -251,9 +241,9 @@ class TokenizerManager:
                 rid = obj.rid[i]
                 with self.lock:
                     state = self.rid_to_state[rid]
-                print("tokenizer generate request multiple wait for event")
+                # print("tokenizer generate request multiple wait for event")
                 await state.event.wait()
-                print("tokenizer generate request multiple wait for event complete")
+                # print("tokenizer generate request multiple wait for event complete")
                 output_list.append(state.out_list[-1])
                 assert state.finished
                 with self.lock:
@@ -270,18 +260,13 @@ class TokenizerManager:
         # self.send_to_router.send_pyobj(flush_cache_req)
         self.router_chan.put_nowait(flush_cache_req)
 
-    async def create_handle_loop(self):
-        self.to_create_loop = False
-        loop = asyncio.get_event_loop()
-        loop.create_task(self.handle_loop())
-
     def handle_loop(self):
-        tokenizer_get = make_async_thread(self.tokenizer_chan.get)
+        # tokenizer_get = make_async_thread(self.tokenizer_chan.get)
 
         while True:
-            print(f"tokenizer manager tokenizer_chan get waiting...")
+            # print(f"tokenizer manager tokenizer_chan get waiting...")
             recv_obj = self.tokenizer_chan.get()
-            print(f"tokenizer manager tokenizer_chan get done: {recv_obj}")
+            # print(f"tokenizer manager tokenizer_chan get done: {recv_obj}")
 
             if isinstance(recv_obj, BatchStrOut):
                 for i, rid in enumerate(recv_obj.rids):
@@ -295,8 +280,8 @@ class TokenizerManager:
 
                     state.out_list.append(out_dict)
                     state.finished = recv_obj.finished[i]
-                    print(f"tokenizer state.event.set ready rid: {rid}")
+                    # print(f"tokenizer state.event.set ready rid: {rid}")
                     state.event.set()
-                    print(f"tokenizer state.event.set ready done rid: {rid}")
+                    # print(f"tokenizer state.event.set ready done rid: {rid}")
             else:
                 raise ValueError(f"Invalid object: {recv_obj}")

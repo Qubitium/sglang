@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import multiprocessing
+import threading
+import time
+
 import uvloop
 from sglang.srt.backend_config import GLOBAL_BACKEND_CONFIG
 from sglang.srt.managers.router.model_rpc import ModelRpcClient
@@ -28,16 +31,19 @@ class RouterManager:
         self.detokenizer_chan = detokenzier_chan
 
         self.recv_reqs = []
+        self.lock = threading.Lock()
 
         # Init some configs
         self.extend_dependency_time = GLOBAL_BACKEND_CONFIG.extend_dependency_time
 
-    async def loop_for_forward(self):
+    def loop_for_forward(self):
         while True:
-            next_step_input = list(self.recv_reqs)
-            self.recv_reqs = []
+            with self.lock:
+                next_step_input = list(self.recv_reqs)
+                self.recv_reqs = []
+
             # print(f"model_client.step wait...")
-            out_pyobjs = await self.model_client.step(next_step_input)
+            out_pyobjs = self.model_client.step(next_step_input)
             # print(f"model_client.step done: {out_pyobjs}")
 
             for obj in out_pyobjs:
@@ -47,18 +53,19 @@ class RouterManager:
             if len(out_pyobjs) != 0:
                 has_finished = any([obj.finished for obj in out_pyobjs])
                 if has_finished:
-                    await asyncio.sleep(self.extend_dependency_time)
+                    time.sleep(self.extend_dependency_time)
 
-            await asyncio.sleep(0.0006)
+            time.sleep(0.0006)
 
-    async def loop_for_recv_requests(self):
-        router_get = make_async_thread(self.router_chan.get)
+    def loop_for_recv_requests(self):
+       #  router_get = make_async_thread(self.router_chan.get)
 
         while True:
-            print(f"loop_for_recv_requests wait...")
-            recv_req = await router_get()
-            print(f"loop_for_recv_requests got: {recv_req}")
-            self.recv_reqs.append(recv_req)
+            # print(f"loop_for_recv_requests wait...")
+            recv_req = self.router_chan.get()
+            # print(f"loop_for_recv_requests got: {recv_req}")
+            with self.lock:
+                self.recv_reqs.append(recv_req)
 
 
 def start_router_process(
@@ -84,5 +91,7 @@ def start_router_process(
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.create_task(router.loop_for_recv_requests())
-    loop.run_until_complete(router.loop_for_forward())
+    # loop.create_task(router.loop_for_recv_requests())
+    threading.Thread(target=router.loop_for_recv_requests, daemon=True).start()
+    router.loop_for_forward()
+    # loop.run_until_complete(router.loop_for_forward())

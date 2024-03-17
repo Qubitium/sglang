@@ -1,16 +1,9 @@
-import asyncio
 import multiprocessing
-import threading
-
-import uvloop
 from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.io_struct import BatchStrOut, BatchTokenIDOut
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
 from sglang.srt.utils import make_async_thread
-
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-
 
 class DetokenizerManager:
     def __init__(
@@ -36,12 +29,12 @@ class DetokenizerManager:
         )
 
     def handle_loop(self):
-        detokenizer_get = make_async_thread(self.detokenizer_chan.get)
+        # detokenizer_get = make_async_thread(self.detokenizer_chan.get)
 
         while True:
-            print(f"detokenizer detokenizer_chan get wait...")
+            # print(f"detokenizer detokenizer_chan get wait...")
             recv_obj = self.detokenizer_chan.get()
-            print(f"detokenizer detokenizer_chan get done: {recv_obj}")
+            # print(f"detokenizer detokenizer_chan get done: {recv_obj}")
 
             if isinstance(recv_obj, BatchTokenIDOut):
                 output_tokens = recv_obj.output_tokens
@@ -73,7 +66,7 @@ class DetokenizerManager:
                         recv_obj.output_and_jump_forward_strs[i] + output_strs[i]
                     )
 
-                print(f"detokenizer tokenizer_chan put")
+                # print(f"detokenizer tokenizer_chan put")
                 self.tokenizer_chan.put_nowait(
                     BatchStrOut(
                         recv_obj.rids,
@@ -82,7 +75,7 @@ class DetokenizerManager:
                         recv_obj.finished,
                     )
                 )
-                print(f"detokenizer tokenizer_chan put done")
+                # print(f"detokenizer tokenizer_chan put done")
             else:
                 raise ValueError(f"Invalid object: {recv_obj}")
 
@@ -99,6 +92,4 @@ def start_detokenizer_process(
         pipe_writer.send(get_exception_traceback())
         raise
     pipe_writer.send("init ok")
-    #loop = asyncio.get_event_loop()
-    #loop.run_until_complete(manager.handle_loop())
     manager.handle_loop()
