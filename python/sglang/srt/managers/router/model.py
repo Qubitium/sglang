@@ -30,7 +30,7 @@ from vllm.logger import _default_handler as vllm_default_handler
 logger = logging.getLogger("model_rpc")
 
 
-class ModelRpcServer():
+class ModelServer():
     def exposed_init_model(
         self,
         tp_rank: int,
@@ -609,7 +609,7 @@ class ModelRpcClient:
 
         if tp_size == 1:
             # Init model
-            self.model_server = ModelRpcServer()
+            self.model_server = ModelServer()
             self.model_server.exposed_init_model(0, server_args, port_args)
 
             # Wrap functions
