@@ -1,16 +1,11 @@
-import asyncio
 import logging
 import multiprocessing
-import threading
+import queue
 import time
 
-import uvloop
-from sglang.srt.backend_config import GLOBAL_BACKEND_CONFIG
 from sglang.srt.managers.router.model_rpc import ModelRpcClient
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
-from sglang.srt.utils import make_async_thread
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 
 class RouterManager:
@@ -20,17 +15,21 @@ class RouterManager:
         self.router_chan = router_chan
         self.detokenizer_chan = detokenzier_chan
 
-        self.recv_reqs = []
-        self.lock = threading.Lock()
-
-        # Init some configs
-        self.extend_dependency_time = GLOBAL_BACKEND_CONFIG.extend_dependency_time
-
     def loop_for_forward(self):
+        idle = False
         while True:
-            with self.lock:
-                next_step_input = list(self.recv_reqs)
-                self.recv_reqs = []
+            next_step_input = []
+
+            # TODO FIX ME this blocks processing
+            # if idle and self.router_chan.qsize() == 0:
+            #     next_step_input.append(self.router_chan.get())
+
+            # non-blocking queue flush
+            while self.router_chan.qsize() > 0:
+                try:
+                    next_step_input.append(self.router_chan.get_nowait())
+                except queue.Empty:
+                    break
 
             # print(f"model_client.step wait...")
             out_pyobjs = self.model_client.step(next_step_input)
@@ -39,24 +38,12 @@ class RouterManager:
             for obj in out_pyobjs:
                 self.detokenizer_chan.put_nowait(obj)
 
-            # async sleep for receiving the subsequent request and avoiding cache miss
-            # if len(out_pyobjs) != 0:
-            #     has_finished = any([obj.finished for obj in out_pyobjs])
-            #     if has_finished:
-            #         time.sleep(self.extend_dependency_time)
-
-            # TODO FIXME
-            time.sleep(0.0006)
-
-    def loop_for_recv_requests(self):
-       #  router_get = make_async_thread(self.router_chan.get)
-
-        while True:
-            # print(f"loop_for_recv_requests wait...")
-            recv_req = self.router_chan.get()
-            # print(f"loop_for_recv_requests got: {recv_req}")
-            with self.lock:
-                self.recv_reqs.append(recv_req)
+            # the model inference is empty
+            if len(out_pyobjs) == 0:
+                idle = True
+                time.sleep(0.0001)
+            else:
+                idle = False
 
 
 def start_router_process(
@@ -80,9 +67,5 @@ def start_router_process(
 
     startup_chan.put_nowait("init ok")
 
-    #loop = asyncio.new_event_loop()
-    #asyncio.set_event_loop(loop)
-    # loop.create_task(router.loop_for_recv_requests())
-    threading.Thread(target=router.loop_for_recv_requests, daemon=True).start()
+    # blocking
     router.loop_for_forward()
-    # loop.run_until_complete(router.loop_for_forward())
