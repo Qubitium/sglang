@@ -280,8 +280,8 @@ class ModelRunner:
         total_gpu_memory = get_available_gpu_memory(
             self.tp_rank, distributed=self.tp_size > 1
         ) * (1 << 30)
-        self.load_model()
-        self.init_memory_pool(total_gpu_memory)
+        dtype = self.load_model()
+        self.init_memory_pool(total_gpu_memory, dtype)
 
         self.is_multimodal_model = is_multimodal_model(self.model_config)
 
@@ -294,11 +294,16 @@ class ModelRunner:
 
         # Load weights
         linear_method = None
-        with _set_default_torch_dtype(torch.float16):
+        hf_quant_config = getattr(
+            self.model_config.hf_config, "quantization_config", None
+        )
+
+        # TODO FIX ME non-quant model dtype should be passed in ServerArgs
+        # quant models can only operate in  float16 and non-quant has no such limitation
+        dtype = torch.float16 if hf_quant_config is not None else torch.bfloat16
+
+        with _set_default_torch_dtype(dtype):
             with torch.device("cuda"):
-                hf_quant_config = getattr(
-                    self.model_config.hf_config, "quantization_config", None
-                )
                 if hf_quant_config is not None:
                     hf_quant_method = hf_quant_config["quant_method"]
 
@@ -329,6 +334,8 @@ class ModelRunner:
 
         logger.info(f"Rank {self.tp_rank}: load weight end.")
 
+        return dtype
+
     def profile_max_num_token(self, total_gpu_memory):
         available_gpu_memory = get_available_gpu_memory(
             self.tp_rank, distributed=self.tp_size > 1
@@ -342,7 +349,7 @@ class ModelRunner:
         max_num_token = int(rest_memory // cell_size)
         return max_num_token
 
-    def init_memory_pool(self, total_gpu_memory):
+    def init_memory_pool(self, total_gpu_memory, dtype = torch.float16):
         self.max_total_num_token = self.profile_max_num_token(total_gpu_memory)
 
         if self.max_total_num_token <= 0:
@@ -356,7 +363,7 @@ class ModelRunner:
         )
         self.token_to_kv_pool = TokenToKVPool(
             self.max_total_num_token,
-            dtype=torch.float16,
+            dtype=dtype,
             head_num=self.model_config.num_key_value_heads // self.tp_size,
             head_dim=self.model_config.head_dim,
             layer_num=self.model_config.num_hidden_layers,
