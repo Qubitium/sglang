@@ -3,13 +3,13 @@ import multiprocessing
 import queue
 import time
 
-from sglang.srt.managers.router.model_rpc import ModelRpcClient
+from sglang.srt.managers.router.model import ModelClient
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
 
 
 class RouterManager:
-    def __init__(self, model_client: ModelRpcClient, router_chan: multiprocessing.Queue, detokenzier_chan: multiprocessing.Queue):
+    def __init__(self, model_client: ModelClient, router_chan: multiprocessing.Queue, detokenzier_chan: multiprocessing.Queue):
         # Init status
         self.model_client = model_client
         self.router_chan = router_chan
@@ -59,7 +59,7 @@ def start_router_process(
     )
 
     try:
-        model_client = ModelRpcClient(server_args, port_args)
+        model_client = ModelClient(server_args, port_args)
         router = RouterManager(model_client, router_chan, detokenizer_chan)
     except Exception:
         startup_chan.put_nowait(get_exception_traceback())

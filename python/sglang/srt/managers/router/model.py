@@ -3,8 +3,6 @@ import logging
 import warnings
 from typing import List
 import torch
-from rpyc.utils.classic import obtain
-from rpyc.utils.server import ThreadedServer
 from sglang.srt.constrained.fsm_cache import FSMCache
 from sglang.srt.constrained.jump_forward import JumpForwardCache
 from sglang.srt.hf_transformers_utils import get_processor, get_tokenizer
@@ -37,7 +35,6 @@ class ModelServer():
         server_args: ServerArgs,
         port_args: PortArgs,
     ):
-        server_args, port_args = [obtain(x) for x in [server_args, port_args]]
 
         # Copy arguments
         self.tp_rank = tp_rank
@@ -161,9 +158,6 @@ class ModelServer():
             )
 
     def exposed_step(self, recv_reqs):
-        if self.tp_size != 1:
-            recv_reqs = obtain(recv_reqs)
-
         try:
             # Recv requests
             for recv_req in recv_reqs:
@@ -603,7 +597,7 @@ class ModelServer():
                 batch.reqs = []
 
 
-class ModelRpcClient:
+class ModelClient:
     def __init__(self, server_args: ServerArgs, port_args: PortArgs):
         tp_size = server_args.tp_size
 
