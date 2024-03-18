@@ -260,7 +260,7 @@ class ModelServer():
         req.tokenizer = self.tokenizer
 
         # Init regex fsm
-        if req.sampling_params.regex is not None:
+        if req.sampling_params.regex:
             req.regex_fsm = self.regex_fsm_cache.query(req.sampling_params.regex)
             if not self.disable_regex_jump_forward:
                 req.jump_forward_map = self.jump_forward_cache.query(
