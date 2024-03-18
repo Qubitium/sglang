@@ -15,16 +15,6 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 class RouterManager:
     def __init__(self, model_client: ModelRpcClient, router_chan: multiprocessing.Queue, detokenzier_chan: multiprocessing.Queue):
-        # Init communication
-        # context = zmq.asyncio.Context(2)
-        # self.recv_from_tokenizer = context.socket(zmq.PULL)
-        # self.recv_from_tokenizer.bind(f"tcp://127.0.0.1:{port_args.router_port}")
-
-        # self.send_to_detokenizer = context.socket(zmq.PUSH)
-        # self.send_to_detokenizer.connect(
-        #     f"tcp://127.0.0.1:{port_args.detokenizer_port}"
-        # )
-
         # Init status
         self.model_client = model_client
         self.router_chan = router_chan
@@ -50,11 +40,12 @@ class RouterManager:
                 self.detokenizer_chan.put_nowait(obj)
 
             # async sleep for receiving the subsequent request and avoiding cache miss
-            if len(out_pyobjs) != 0:
-                has_finished = any([obj.finished for obj in out_pyobjs])
-                if has_finished:
-                    time.sleep(self.extend_dependency_time)
+            # if len(out_pyobjs) != 0:
+            #     has_finished = any([obj.finished for obj in out_pyobjs])
+            #     if has_finished:
+            #         time.sleep(self.extend_dependency_time)
 
+            # TODO FIXME
             time.sleep(0.0006)
 
     def loop_for_recv_requests(self):

@@ -619,11 +619,11 @@ class ModelRpcClient:
             self.model_server.exposed_init_model(0, server_args, port_args)
 
             # Wrap functions
-            def async_wrap(f):
-                async def _func(*args, **kwargs):
-                    return f(*args, **kwargs)
-
-                return _func
+            # def async_wrap(f):
+            #     async def _func(*args, **kwargs):
+            #         return f(*args, **kwargs)
+            #
+            #     return _func
 
             # self.step = async_wrap(self.model_server.exposed_step)
             self.step = self.model_server.exposed_step
@@ -641,15 +641,15 @@ class ModelRpcClient:
                 rets = [obtain(x) for x in executor.map(init_model, range(tp_size))]
 
             # Wrap functions
-            def async_wrap(func_name):
-                fs = [rpyc.async_(getattr(m, func_name)) for m in self.model_servers]
-
-                async def _func(*args, **kwargs):
-                    tasks = [f(*args, **kwargs) for f in fs]
-                    await asyncio.gather(*[asyncio.to_thread(t.wait) for t in tasks])
-                    return obtain(tasks[0].value)
-
-                return _func
+            # def async_wrap(func_name):
+            #     fs = [rpyc.async_(getattr(m, func_name)) for m in self.model_servers]
+            #
+            #     async def _func(*args, **kwargs):
+            #         tasks = [f(*args, **kwargs) for f in fs]
+            #         await asyncio.gather(*[asyncio.to_thread(t.wait) for t in tasks])
+            #         return obtain(tasks[0].value)
+            #
+            #     return _func
 
             # self.step = async_wrap("step")
 
