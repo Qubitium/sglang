@@ -1,13 +1,7 @@
-import asyncio
-import logging
-import multiprocessing
-import time
-import warnings
-from concurrent.futures import ThreadPoolExecutor
-from typing import List
 
-import numpy as np
-import rpyc
+import logging
+import warnings
+from typing import List
 import torch
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
@@ -36,7 +30,7 @@ from vllm.logger import _default_handler as vllm_default_handler
 logger = logging.getLogger("model_rpc")
 
 
-class ModelRpcServer(rpyc.Service):
+class ModelRpcServer():
     def exposed_init_model(
         self,
         tp_rank: int,
@@ -627,18 +621,18 @@ class ModelRpcClient:
 
             # self.step = async_wrap(self.model_server.exposed_step)
             self.step = self.model_server.exposed_step
-        else:
-            with ThreadPoolExecutor(tp_size) as executor:
-                # Launch model processes
-                rets = executor.map(start_model_process, port_args.model_rpc_ports)
-                self.model_servers = [x[0] for x in rets]
-                self.procs = [x[1] for x in rets]
-
-                # Init model
-                def init_model(i):
-                    return self.model_servers[i].init_model(i, server_args, port_args)
-
-                rets = [obtain(x) for x in executor.map(init_model, range(tp_size))]
+        # else:
+        #     with ThreadPoolExecutor(tp_size) as executor:
+        #         # Launch model processes
+        #         rets = executor.map(start_model_process, port_args.model_rpc_ports)
+        #         self.model_servers = [x[0] for x in rets]
+        #         self.procs = [x[1] for x in rets]
+        #
+        #         # Init model
+        #         def init_model(i):
+        #             return self.model_servers[i].init_model(i, server_args, port_args)
+        #
+        #         rets = [obtain(x) for x in executor.map(init_model, range(tp_size))]
 
             # Wrap functions
             # def async_wrap(func_name):
@@ -654,34 +648,3 @@ class ModelRpcClient:
             # self.step = async_wrap("step")
 
 
-def _init_service(port):
-    t = ThreadedServer(
-        ModelRpcServer(),
-        port=port,
-        protocol_config={"allow_pickle": True, "sync_request_timeout": 1800},
-    )
-    t.start()
-
-
-def start_model_process(port):
-    proc = multiprocessing.Process(target=_init_service, args=(port,))
-    proc.start()
-    time.sleep(1)
-
-    repeat_count = 0
-    while repeat_count < 20:
-        try:
-            con = rpyc.connect(
-                "localhost",
-                port,
-                config={"allow_pickle": True, "sync_request_timeout": 1800},
-            )
-            break
-        except ConnectionRefusedError:
-            time.sleep(1)
-        repeat_count += 1
-    if repeat_count == 20:
-        raise RuntimeError("init rpc env error!")
-
-    assert proc.is_alive()
-    return con.root, proc
