@@ -552,10 +552,10 @@ class ModelRpcServer():
 
                 meta_info = {
                     "prompt_tokens": req.prompt_tokens,
-                    "completion_tokens": len(req.input_ids)
-                    + len(req.output_ids)
-                    - req.prompt_tokens,
+                    "prompt_tokens_ids": req.input_ids,
+                    "completion_tokens": len(req.output_ids),
                     "completion_tokens_wo_jump_forward": req.completion_tokens_wo_jump_forward,
+                    "completion_tokens_ids": req.output_ids,
                 }
                 if req.return_logprob:
                     meta_info["prompt_logprob"] = req.logprob
