@@ -114,8 +114,15 @@ class TokenizerManager:
                 trust_remote_code=server_args.trust_remote_code,
             )
 
-        self.model_output_thread = None
+        self.work_thread = None
         self.rid_to_state = {}  # Dict[str -> ReqState]
+
+    def start(self):
+        if self.work_thread is None:
+            print(f"tokenizer generate_request create handel loop")
+            # await self.create_handle_loop()
+            self.work_thread = threading.Thread(target=self.model_output_loop, daemon=True)
+            self.work_thread.start()
 
     async def get_pixel_values(self, image_data):
         aspect_ratio = getattr(self.hf_config, "image_aspect_ratio", None)
@@ -137,13 +144,6 @@ class TokenizerManager:
             )
 
     async def generate_request(self, obj: GenerateReqInput):
-        if self.model_output_thread is None:
-
-            print(f"tokenizer generate_request create handel loop")
-            # await self.create_handle_loop()
-            self.model_output_thread = threading.Thread(target=self.model_output_loop, daemon=True)
-            self.model_output_thread.start()
-
         is_single = isinstance(obj.text, str)
 
         if is_single:

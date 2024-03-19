@@ -475,6 +475,7 @@ def launch_server(server_args, pipe_finish_writer):
 
     # Launch processes
     tokenizer_manager = TokenizerManager(server_args, output_chan, router_chan)
+    tokenizer_manager.start()
 
     proc_router = mp.Process(
         target=start_router_process,
