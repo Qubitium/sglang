@@ -31,10 +31,9 @@ from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_
 
 @dataclasses.dataclass
 class ReqState:
-    out_list: List
+    out: None
     finished: bool
     event: asyncio.Event
-    lock: asyncio.Lock
 
 
 global global_processor
@@ -177,21 +176,19 @@ class TokenizerManager:
                 stream=obj.stream,
             )
 
-            lock = asyncio.Lock()
             event = asyncio.Event()
-            state = ReqState([], False, event, lock)
+            state = ReqState([], False, event)
             with self.lock:
                 self.rid_to_state[rid] = state
 
-            # self.send_to_router.send_pyobj(tokenized_obj)
             self.router_chan.put_nowait(tokenized_obj)
 
             while True:
                 # print(f"tokenizer generate request single wait for event rid: {rid}")
                 await event.wait()
                 # print(f"tokenizer generate request single wait for event done rid: {rid}")
-                yield state.out_list[-1]
-                state.out_list = []
+                yield state.out
+                state.out = None
                 if state.finished:
                     with self.lock:
                         del self.rid_to_state[rid]
@@ -226,14 +223,13 @@ class TokenizerManager:
                     logprob_start_len=obj.logprob_start_len[i],
                     stream=obj.stream,
                 )
-                # self.send_to_router.send_pyobj(tokenized_obj)
+
                 # print(f"tokenizer generate_request router_chan put")
                 self.router_chan.put_nowait(tokenized_obj)
                 # print(f"tokenizer generate_request router_chan put done")
 
-                lock = asyncio.Lock()
                 event = asyncio.Event()
-                state = ReqState([], False, event, lock)
+                state = ReqState([], False, event)
                 with self.lock:
                     self.rid_to_state[rid] = state
 
@@ -245,7 +241,7 @@ class TokenizerManager:
                 # print("tokenizer generate request multiple wait for event")
                 await state.event.wait()
                 # print("tokenizer generate request multiple wait for event complete")
-                output_list.append(state.out_list[-1])
+                output_list.append(state.out)
                 assert state.finished
                 with self.lock:
                     del self.rid_to_state[rid]
@@ -278,7 +274,9 @@ class TokenizerManager:
                 with self.lock:
                     state = self.rid_to_state[rid]
 
-                state.out_list.append(out_dict)
+                assert state.out is None
+
+                state.out = out_dict
                 state.finished = recv_obj.finished[i]
                 # print(f"tokenizer state.event.set ready rid: {rid}")
                 state.event.set()
