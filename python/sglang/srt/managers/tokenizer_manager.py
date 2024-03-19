@@ -234,7 +234,8 @@ class TokenizerManager:
                 )
 
                 # print(f"tokenizer generate_request router_chan put")
-                self.router_chan.put_nowait(tokenized_obj)
+                # no need to wait
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
                 # print(f"tokenizer generate_request router_chan put done")
 
                 event = asyncio.Event()
