@@ -32,7 +32,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 @dataclasses.dataclass
 class ReqState:
-    out: List[dict]
+    out_list: List[dict]
     finished: bool
     event: asyncio.Event
 
