@@ -16,7 +16,6 @@ class RouterManager:
         self.detokenizer_chan = detokenzier_chan
 
     def loop_for_forward(self):
-        idle = False
         while True:
             next_step_input = []
 
@@ -32,18 +31,16 @@ class RouterManager:
                     break
 
             # print(f"model_client.step wait...")
-            out_pyobjs = self.model_client.step(next_step_input)
+            output = self.model_client.step(next_step_input)
             # print(f"model_client.step done: {out_pyobjs}")
 
-            for obj in out_pyobjs:
-                self.detokenizer_chan.put_nowait(obj)
+            for item in output:
+                self.detokenizer_chan.put_nowait(item)
 
             # the model inference is empty
-            if len(out_pyobjs) == 0:
-                idle = True
-                time.sleep(0.0001)
-            else:
-                idle = False
+            if len(output) == 0:
+                # prevent spin loop causing too much cpu usage
+                time.sleep(0.0004)
 
 
 def start_router_process(
