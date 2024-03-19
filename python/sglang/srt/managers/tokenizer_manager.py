@@ -30,6 +30,7 @@ from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
+
 @dataclasses.dataclass
 class ReqState:
     out_list: List[dict]
@@ -39,7 +40,8 @@ class ReqState:
 
 global global_processor
 
-THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+
 
 def init_global_processor(server_args: ServerArgs):
     global global_processor
@@ -86,7 +88,7 @@ class TokenizerManager:
         self.router_chan = router_chan
         self.detokenizer_chan = detokenizer_chan
 
-        self.lock = threading.Lock()
+        # self.lock = asyncio.Lock()
 
         self.model_path = server_args.model_path
         self.hf_config = get_config(
@@ -115,18 +117,16 @@ class TokenizerManager:
                 trust_remote_code=server_args.trust_remote_code,
             )
 
-        # self.output_thread = None
-        self.decoder_threads = []
         self.rid_to_state = {}  # Dict[str -> ReqState]
+        self.decoder_task = None
+        self.lock = asyncio.Lock()
 
-    def start(self):
-        # TODO FIXME make sure sglang loads only the FAST tokenizers which rust based
-        if len(self.decoder_threads) == 0:
-            print(f"tokenizer generate_request decoder loop")
-            for i in range(4):
-                t = threading.Thread(target=self.decoder_loop, daemon=True)
-                t.start()
-                self.decoder_threads.append(t)
+    async def start(self):
+        async with self.lock:
+            if self.decoder_task is None:
+                # TODO FIXME make sure sglang loads only the FAST tokenizers which rust based
+                print(f"tokenizer generate_request decoder loop")
+                self.decoder_task = asyncio.create_task(self.decoder_loop())
 
     async def get_pixel_values(self, image_data):
         aspect_ratio = getattr(self.hf_config, "image_aspect_ratio", None)
@@ -148,6 +148,8 @@ class TokenizerManager:
             )
 
     async def generate_request(self, obj: GenerateReqInput):
+        await self.start()
+
         is_single = isinstance(obj.text, str)
 
         if is_single:
@@ -186,7 +188,7 @@ class TokenizerManager:
 
             event = asyncio.Event()
             state = ReqState([], False, event)
-            with self.lock:
+            async with self.lock:
                 self.rid_to_state[rid] = state
 
             # no need to wait
@@ -199,7 +201,7 @@ class TokenizerManager:
                 yield state.out_list[-1]
                 state.out_list = []
                 if state.finished:
-                    with self.lock:
+                    async with self.lock:
                         del self.rid_to_state[rid]
                     break
                 event.clear()
@@ -240,20 +242,20 @@ class TokenizerManager:
 
                 event = asyncio.Event()
                 state = ReqState([], False, event)
-                with self.lock:
+                async with self.lock:
                     self.rid_to_state[rid] = state
 
             output_list = []
             for i in range(bs):
                 rid = obj.rid[i]
-                with self.lock:
+                async with self.lock:
                     state = self.rid_to_state[rid]
                 # print("tokenizer generate request multiple wait for event")
                 await state.event.wait()
                 # print("tokenizer generate request multiple wait for event complete")
                 output_list.append(state.out_list[-1])
                 assert state.finished
-                with self.lock:
+                async with self.lock:
                     del self.rid_to_state[rid]
 
             yield output_list
@@ -267,19 +269,19 @@ class TokenizerManager:
         # self.send_to_router.send_pyobj(flush_cache_req)
         self.router_chan.put_nowait(flush_cache_req)
 
-    def decoder_loop(self):
+    async def decoder_loop(self):
+        print("in decoder_loop ")
         while True:
-            # print(f"detokenizer detokenizer_chan get wait...")
-            recv_obj = self.detokenizer_chan.get()
-            # print(f"detokenizer detokenizer_chan get done: {recv_obj}")
+            print(f"detokenizer detokenizer_chan get wait...")
+            recv_obj = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.get)
+            print(f"detokenizer detokenizer_chan get done: {recv_obj}")
 
             output_tokens = recv_obj.output_tokens
 
             # TODO(lmzheng): handle skip_special_tokens per request
-            output_strs = self.tokenizer.batch_decode(
-                output_tokens,
-                skip_special_tokens=recv_obj.skip_special_tokens[0],
-            )
+            output_strs = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.tokenizer.batch_decode,
+                                                                         output_tokens, recv_obj.skip_special_tokens[0]
+                                                                         )
 
             # Trim stop str
             # TODO(lmzheng): handle the case where multiple stop strs are hit
@@ -290,9 +292,11 @@ class TokenizerManager:
                         output_strs[i] = output_strs[i][:pos]
 
                 if len(output_tokens[i]) > 0:
-                    first_token = self.tokenizer.convert_ids_to_tokens(
-                        int(output_tokens[i][0])
-                    )
+                    first_token = await asyncio.get_event_loop().run_in_executor(THREAD_POOL,
+                                                                                 self.tokenizer.convert_ids_to_tokens,
+                                                                                 int(output_tokens[i][0])
+                                                                                 )
+
                     if not isinstance(first_token, str):
                         first_token = first_token.decode("utf-8", errors="ignore")
                     if first_token.startswith("▁"):
@@ -317,7 +321,7 @@ class TokenizerManager:
                     "text": output.output_str[i],
                     "meta_info": output.meta_info[i],
                 }
-                with self.lock:
+                async with self.lock:
                     state = self.rid_to_state[rid]
 
                 state.out_list.append(out_dict)
