@@ -44,11 +44,12 @@ class RouterManager:
             for item in output:
                 self.detokenizer_chan.put_nowait(item)
 
+            time.sleep(0.0004)
             # the model inference is empty
-            if len(output) == 0:
-                # TODO FIXME make this configurable
-                # prevent spin loop causing too much cpu usage
-                time.sleep(0.0004)
+            # if len(output) == 0:
+            #     # TODO FIXME make this configurable
+            #     # prevent spin loop causing too much cpu usage
+            #     time.sleep(0.0004)
 
 
 def start_router_process(
