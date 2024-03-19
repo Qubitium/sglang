@@ -154,7 +154,7 @@ class InputMetadata:
                 self.model_runner.model_config.head_dim,
                 1,
                 "NONE",
-                str(model_runner.torch_dtype).split(".")[1],
+                model_runner.torch_dtype,
             )
 
     def init_extend_args(self):
