@@ -27,6 +27,10 @@ class RouterManager:
             while self.router_chan.qsize() > 0:
                 try:
                     next_step_input.append(self.router_chan.get_nowait())
+                    # try to merge requests
+                    if self.router_chan.qsize() == 0:
+                        # TODO FIXME make this configurable
+                        time.sleep(0.01)
                 except queue.Empty:
                     break
 
@@ -39,6 +43,7 @@ class RouterManager:
 
             # the model inference is empty
             if len(output) == 0:
+                # TODO FIXME make this configurable
                 # prevent spin loop causing too much cpu usage
                 time.sleep(0.0004)
 
