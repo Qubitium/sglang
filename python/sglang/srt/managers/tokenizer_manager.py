@@ -113,7 +113,7 @@ class TokenizerManager:
                 trust_remote_code=server_args.trust_remote_code,
             )
 
-        self.to_create_loop = True
+        self.model_output_thread = None
         self.rid_to_state = {}  # Dict[str -> ReqState]
 
     async def get_pixel_values(self, image_data):
@@ -136,11 +136,12 @@ class TokenizerManager:
             )
 
     async def generate_request(self, obj: GenerateReqInput):
-        if self.to_create_loop:
-            self.to_create_loop = False
+        if self.model_output_thread is None:
+
             print(f"tokenizer generate_request create handel loop")
             # await self.create_handle_loop()
-            threading.Thread(target=self.handle_loop, daemon=True).start()
+            self.model_output_thread = threading.Thread(target=self.model_output_loop, daemon=True)
+            self.model_output_thread.start()
 
         is_single = isinstance(obj.text, str)
 
@@ -257,25 +258,25 @@ class TokenizerManager:
         # self.send_to_router.send_pyobj(flush_cache_req)
         self.router_chan.put_nowait(flush_cache_req)
 
-    def handle_loop(self):
+    def model_output_loop(self):
         # tokenizer_get = make_async_thread(self.tokenizer_chan.get)
 
         while True:
             # print(f"tokenizer manager tokenizer_chan get waiting...")
-            recv_obj = self.tokenizer_chan.get()
+            output = self.tokenizer_chan.get()
             # print(f"tokenizer manager tokenizer_chan get done: {recv_obj}")
 
-            for i, rid in enumerate(recv_obj.rids):
-                recv_obj.meta_info[i]["id"] = rid
+            for i, rid in enumerate(output.rids):
+                output.meta_info[i]["id"] = rid
                 out_dict = {
-                    "text": recv_obj.output_str[i],
-                    "meta_info": recv_obj.meta_info[i],
+                    "text": output.output_str[i],
+                    "meta_info": output.meta_info[i],
                 }
                 with self.lock:
                     state = self.rid_to_state[rid]
 
                 state.out_list.append(out_dict)
-                state.finished = recv_obj.finished[i]
+                state.finished = output.finished[i]
                 # print(f"tokenizer state.event.set ready rid: {rid}")
                 state.event.set()
                 # print(f"tokenizer state.event.set ready done rid: {rid}")
