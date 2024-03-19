@@ -39,6 +39,7 @@ class ReqState:
 
 global global_processor
 
+TOKENIZER_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 def init_global_processor(server_args: ServerArgs):
     global global_processor
@@ -152,7 +153,9 @@ class TokenizerManager:
         if is_single:
             # print(f"tokenizer generate_request single request")
             rid = obj.rid
-            input_ids = self.tokenizer.encode(obj.text)
+
+            input_ids = await asyncio.get_event_loop().run_in_executor(TOKENIZER_POOL, self.tokenizer.encode, obj.text)
+
             sampling_params = SamplingParams(**obj.sampling_params)
             if sampling_params.max_new_tokens != 0:
                 sampling_params.normalize(self.tokenizer)
