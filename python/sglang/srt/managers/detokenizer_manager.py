@@ -1,17 +1,18 @@
 import multiprocessing
+import queue
+import threading
+
 from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.io_struct import BatchStrOut, BatchTokenIDOut
-from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils import get_exception_traceback
-from sglang.srt.utils import make_async_thread
+from sglang.srt.server_args import ServerArgs
 
 
 class DetokenizerManager:
     def __init__(
-        self,
-        server_args: ServerArgs,
-        detokenizer_chan: multiprocessing.Queue,
-        output_chan: multiprocessing.Queue,
+            self,
+            server_args: ServerArgs,
+            detokenizer_chan: multiprocessing.Queue,
+            output_chan: queue.Queue,
     ):
         self.detokenizer_chan = detokenizer_chan
         self.output_chan = output_chan
@@ -21,6 +22,13 @@ class DetokenizerManager:
             tokenizer_mode=server_args.tokenizer_mode,
             trust_remote_code=server_args.trust_remote_code,
         )
+
+        self.work_thread = None
+
+    def start(self):
+        if self.work_thread is None:
+            self.work_thread = threading.Thread(target=self.work_loop, daemon=True)
+            self.work_thread.start()
 
     def work_loop(self):
         # detokenizer_get = make_async_thread(self.detokenizer_chan.get)
@@ -57,7 +65,7 @@ class DetokenizerManager:
                             output_strs[i] = " " + output_strs[i]
 
                     output_strs[i] = (
-                        recv_obj.output_and_jump_forward_strs[i] + output_strs[i]
+                            recv_obj.output_and_jump_forward_strs[i] + output_strs[i]
                     )
 
                 # print(f"detokenizer tokenizer_chan put")
@@ -72,18 +80,3 @@ class DetokenizerManager:
                 # print(f"detokenizer tokenizer_chan put done")
             else:
                 raise ValueError(f"Invalid object: {recv_obj}")
-
-
-def start_detokenizer_process(
-    server_args: ServerArgs,
-    detokenizer_chan: multiprocessing.Queue,
-    output_chan: multiprocessing.Queue,
-    startup_chan: multiprocessing.Queue,
-):
-    try:
-        manager = DetokenizerManager(server_args, detokenizer_chan, output_chan)
-    except Exception as e:
-        startup_chan.put_nowait(get_exception_traceback())
-        raise
-    startup_chan.put_nowait("init ok")
-    manager.work_loop()

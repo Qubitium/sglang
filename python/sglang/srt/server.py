@@ -5,6 +5,7 @@ import dataclasses
 import json
 import multiprocessing as mp
 import os
+import queue
 import sys
 import threading
 import time
@@ -33,7 +34,7 @@ from sglang.srt.conversation import (
     register_conv_template,
 )
 from sglang.srt.hf_transformers_utils import get_tokenizer
-from sglang.srt.managers.detokenizer_manager import start_detokenizer_process
+from sglang.srt.managers.detokenizer_manager import DetokenizerManager
 from sglang.srt.managers.io_struct import DetokenizeReqInput, GenerateReqInput
 from sglang.srt.managers.openai_protocol import (
     ChatCompletionRequest,
@@ -469,13 +470,16 @@ def launch_server(server_args, pipe_finish_writer):
 
     router_chan = mp.Queue()
     detokenizer_chan = mp.Queue()
-    output_chan = mp.Queue()
+    output_chan = queue.Queue()
 
     startup_chan = mp.Queue()
 
     # Launch processes
     tokenizer_manager = TokenizerManager(server_args, output_chan, router_chan)
     tokenizer_manager.start()
+
+    detokenizer_manager = DetokenizerManager(server_args, detokenizer_chan, output_chan)
+    detokenizer_manager.start()
 
     proc_router = mp.Process(
         target=start_router_process,
@@ -488,29 +492,16 @@ def launch_server(server_args, pipe_finish_writer):
         ),
     )
     proc_router.start()
-    proc_detoken = mp.Process(
-        target=start_detokenizer_process,
-        args=(
-            server_args,
-            detokenizer_chan,
-            output_chan,
-            startup_chan,
-        ),
-    )
-    proc_detoken.start()
 
     # Wait for the model to finish loading
     router_init_state = startup_chan.get()
-    detoken_init_state = startup_chan.get()
 
-    if router_init_state != "init ok" or detoken_init_state != "init ok":
+    if router_init_state != "init ok":
         proc_router.kill()
-        proc_detoken.kill()
         print("router init state:", router_init_state)
-        print("detoken init state:", detoken_init_state)
         sys.exit(1)
 
-    assert proc_router.is_alive() and proc_detoken.is_alive()
+    assert proc_router.is_alive()
 
     if server_args.api_key and server_args.api_key != "":
         app.add_middleware(APIKeyValidatorMiddleware, api_key=server_args.api_key)
