@@ -35,6 +35,9 @@ class RouterManager:
                     break
 
             # print(f"model_client.step wait...")
+            if len(next_step_input) > 0:
+                print(f"Forward Requests batch size: {len(next_step_input)}")
+
             output = self.model_client.step(next_step_input)
             # print(f"model_client.step done: {out_pyobjs}")
 
