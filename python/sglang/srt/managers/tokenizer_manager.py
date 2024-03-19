@@ -115,15 +115,17 @@ class TokenizerManager:
             )
 
         # self.output_thread = None
-        self.decoder_thread = None
+        self.decoder_threads = []
         self.rid_to_state = {}  # Dict[str -> ReqState]
 
     def start(self):
-        if self.decoder_thread is None:
+        # TODO FIXME make sure sglang loads only the FAST tokenizers which rust based
+        if len(self.decoder_threads) == 0:
             print(f"tokenizer generate_request decoder loop")
-            # await self.create_handle_loop()
-            self.decoder_thread = threading.Thread(target=self.decoder_loop, daemon=True)
-            self.decoder_thread.start()
+            for i in range(4):
+                t = threading.Thread(target=self.decoder_loop, daemon=True)
+                t.start()
+                self.decoder_threads.append(t)
 
     async def get_pixel_values(self, image_data):
         aspect_ratio = getattr(self.hf_config, "image_aspect_ratio", None)
