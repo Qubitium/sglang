@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 import importlib.resources
-
 import numpy as np
 import torch
+from sglang.srt.layers import token_attention
 from sglang.srt.managers.router.infer_batch import Batch, ForwardMode
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 from sglang.srt.utils import is_multimodal_model
@@ -18,16 +18,12 @@ from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.model_loader import _set_default_torch_dtype
 from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
 
-import sglang
-
 QUANTIONCONFIG_MAPPING = {"awq": AWQConfig, "gptq": GPTQConfig, "marlin": MarlinConfig}
 
 logger = logging.getLogger("model_runner")
 
-
 # for server args in model endpoints
 global_server_args_dict: dict = None
-
 
 @lru_cache()
 def import_model_classes():
@@ -298,11 +294,20 @@ class ModelRunner:
             self.model_config.hf_config, "quantization_config", None
         )
 
-        # TODO FIX ME non-quant model dtype should be passed in ServerArgs
-        # quant models can only operate in  float16 and non-quant has no such limitation
-        dtype = torch.float16 if hf_quant_config is not None else torch.bfloat16
+        import triton
 
-        with _set_default_torch_dtype(dtype):
+        # quant models can only operate in  float16 and non-quant has no such limitation
+        if hf_quant_config is not None:
+            torch_dtype = torch.float16
+            triton_dtype = triton.language.float16
+        else:
+            torch_dtype = torch.bfloat16
+            triton_dtype = triton.language.bfloat16
+
+        token_attention.REDUCE_TRITON_TYPE = triton_dtype
+        token_attention.REDUCE_TORCH_TYPE = torch_dtype
+
+        with _set_default_torch_dtype(torch_dtype):
             with torch.device("cuda"):
                 if hf_quant_config is not None:
                     hf_quant_method = hf_quant_config["quant_method"]
@@ -334,7 +339,7 @@ class ModelRunner:
 
         logger.info(f"Rank {self.tp_rank}: load weight end.")
 
-        return dtype
+        return torch_dtype
 
     def profile_max_num_token(self, total_gpu_memory):
         available_gpu_memory = get_available_gpu_memory(
@@ -349,7 +354,7 @@ class ModelRunner:
         max_num_token = int(rest_memory // cell_size)
         return max_num_token
 
-    def init_memory_pool(self, total_gpu_memory, dtype = torch.float16):
+    def init_memory_pool(self, total_gpu_memory, dtype=torch.float16):
         self.max_total_num_token = self.profile_max_num_token(total_gpu_memory)
 
         if self.max_total_num_token <= 0:
