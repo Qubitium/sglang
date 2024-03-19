@@ -11,10 +11,10 @@ class DetokenizerManager:
         self,
         server_args: ServerArgs,
         detokenizer_chan: multiprocessing.Queue,
-        tokenizer_chan: multiprocessing.Queue,
+        output_chan: multiprocessing.Queue,
     ):
         self.detokenizer_chan = detokenizer_chan
-        self.tokenizer_chan = tokenizer_chan
+        self.output_chan = output_chan
 
         self.tokenizer = get_tokenizer(
             server_args.tokenizer_path,
@@ -22,7 +22,7 @@ class DetokenizerManager:
             trust_remote_code=server_args.trust_remote_code,
         )
 
-    def handle_loop(self):
+    def work_loop(self):
         # detokenizer_get = make_async_thread(self.detokenizer_chan.get)
 
         while True:
@@ -61,7 +61,7 @@ class DetokenizerManager:
                     )
 
                 # print(f"detokenizer tokenizer_chan put")
-                self.tokenizer_chan.put_nowait(
+                self.output_chan.put_nowait(
                     BatchStrOut(
                         recv_obj.rids,
                         output_strs,
@@ -77,13 +77,13 @@ class DetokenizerManager:
 def start_detokenizer_process(
     server_args: ServerArgs,
     detokenizer_chan: multiprocessing.Queue,
-    tokenizer_chan: multiprocessing.Queue,
+    output_chan: multiprocessing.Queue,
     startup_chan: multiprocessing.Queue,
 ):
     try:
-        manager = DetokenizerManager(server_args, detokenizer_chan, tokenizer_chan)
+        manager = DetokenizerManager(server_args, detokenizer_chan, output_chan)
     except Exception as e:
         startup_chan.put_nowait(get_exception_traceback())
         raise
     startup_chan.put_nowait("init ok")
-    manager.handle_loop()
+    manager.work_loop()

@@ -469,12 +469,12 @@ def launch_server(server_args, pipe_finish_writer):
 
     router_chan = mp.Queue()
     detokenizer_chan = mp.Queue()
-    tokenizer_chan = mp.Queue()
+    output_chan = mp.Queue()
 
     startup_chan = mp.Queue()
 
     # Launch processes
-    tokenizer_manager = TokenizerManager(server_args, tokenizer_chan, router_chan)
+    tokenizer_manager = TokenizerManager(server_args, output_chan, router_chan)
 
     proc_router = mp.Process(
         target=start_router_process,
@@ -492,7 +492,7 @@ def launch_server(server_args, pipe_finish_writer):
         args=(
             server_args,
             detokenizer_chan,
-            tokenizer_chan,
+            output_chan,
             startup_chan,
         ),
     )
