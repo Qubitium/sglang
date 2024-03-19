@@ -79,7 +79,7 @@ class APIKeyValidatorMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app = FastAPI()
+# app = FastAPI()
 tokenizer_manager = None
 chat_template_name = None
 
@@ -93,13 +93,13 @@ def jsonify_pydantic_model(obj: BaseModel):
     return obj.model_dump_json()
 
 
-@app.get("/health")
+# @app.get("/health")
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
 
 
-@app.get("/get_model_info")
+# @app.get("/get_model_info")
 async def get_model_info():
     result = {
         "model_path": tokenizer_manager.model_path,
@@ -107,12 +107,12 @@ async def get_model_info():
     return result
 
 
-@app.get("/get_server_args")
+# @app.get("/get_server_args")
 async def get_server_args():
     return dataclasses.asdict(tokenizer_manager.server_args)
 
 
-@app.get("/flush_cache")
+# @app.get("/flush_cache")
 async def flush_cache():
     await tokenizer_manager.flush_cache()
     return Response(
@@ -150,7 +150,7 @@ async def make_openai_style_logprobs(token_logprobs):
     return ret_logprobs
 
 
-@app.post("/generate")
+# @app.post("/generate")
 async def generate_request(obj: GenerateReqInput):
     obj.post_init()
 
@@ -172,7 +172,7 @@ async def generate_request(obj: GenerateReqInput):
     return ret
 
 
-@app.post("/v1/completions")
+# @app.post("/v1/completions")
 async def v1_completions(raw_request: Request):
     request_json = await raw_request.json()
     request = CompletionRequest(**request_json)
@@ -288,7 +288,7 @@ async def v1_completions(raw_request: Request):
     return response
 
 
-@app.post("/v1/chat/completions")
+# @app.post("/v1/chat/completions")
 async def v1_chat_completions(raw_request: Request):
     request_json = await raw_request.json()
     request = ChatCompletionRequest(**request_json)
@@ -411,7 +411,8 @@ async def v1_chat_completions(raw_request: Request):
     return response
 
 
-def launch_server(server_args, pipe_finish_writer):
+def launch_server(server_args, pipe_finish_writer=None):
+    print("launch_server started.... ")
     global tokenizer_manager
     global chat_template_name
 
@@ -494,18 +495,18 @@ def launch_server(server_args, pipe_finish_writer):
 
     assert proc_router.is_alive()
 
-    if server_args.api_key and server_args.api_key != "":
-        app.add_middleware(APIKeyValidatorMiddleware, api_key=server_args.api_key)
+    # if server_args.api_key and server_args.api_key != "":
+    #     app.add_middleware(APIKeyValidatorMiddleware, api_key=server_args.api_key)
 
-    def _launch_server():
-        uvicorn.run(
-            app,
-            host=server_args.host,
-            port=server_args.port,
-            log_level=server_args.log_level,
-            timeout_keep_alive=5,
-            loop="uvloop",
-        )
+    # def _launch_server():
+    #     uvicorn.run(
+    #         app,
+    #         host=server_args.host,
+    #         port=server_args.port,
+    #         log_level=server_args.log_level,
+    #         timeout_keep_alive=5,
+    #         loop="uvloop",
+    #     )
 
     def _wait_and_warmup():
         headers = {}
@@ -554,12 +555,13 @@ def launch_server(server_args, pipe_finish_writer):
         if pipe_finish_writer is not None:
             pipe_finish_writer.send("init ok")
 
-    t = threading.Thread(target=_wait_and_warmup, daemon=True)
-    t.start()
-    try:
-        _launch_server()
-    finally:
-        t.join()
+    # t = threading.Thread(target=_wait_and_warmup, daemon=True)
+    # t.start()
+    # t.join()
+    # try:
+    #   _launch_server()
+    # finally:
+    #     t.join()
 
 
 class Runtime:
@@ -617,23 +619,27 @@ class Runtime:
             f"http://{self.server_args.host}:{self.server_args.port}/generate"
         )
 
-        self.pid = None
-        pipe_reader, pipe_writer = mp.Pipe(duplex=False)
-        proc = mp.Process(target=launch_server, args=(self.server_args, pipe_writer))
-        proc.start()
-        pipe_writer.close()
-        self.pid = proc.pid
+        # self.pid = None
+        # pipe_reader, pipe_writer = mp.Pipe(duplex=False)
+        # print("Runtime launch_server...")
+        # proc = mp.Process(target=launch_server, args=(self.server_args, pipe_writer))
+        # proc.start()
+        # pipe_writer.close()
+        # self.pid = proc.pid
+        self.pid = os.getgid()
 
-        try:
-            init_state = pipe_reader.recv()
-        except EOFError:
-            init_state = ""
+        threading.Thread(target=launch_server, args=[self.server_args, None], daemon=True).start()
 
-        if init_state != "init ok":
-            self.shutdown()
-            raise RuntimeError("Launch failed. Please see the error messages above.")
+        # try:
+        #     init_state = pipe_reader.recv()
+        # except EOFError:
+        #     init_state = ""
 
-        self.endpoint = RuntimeEndpoint(self.url)
+        # if init_state != "init ok":
+        #     self.shutdown()
+        #     raise RuntimeError("Launch failed. Please see the error messages above.")
+        #
+        # self.endpoint = RuntimeEndpoint(self.url)
 
     def shutdown(self):
         if self.pid is not None:
