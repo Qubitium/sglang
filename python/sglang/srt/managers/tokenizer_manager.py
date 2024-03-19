@@ -31,7 +31,7 @@ from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_
 
 @dataclasses.dataclass
 class ReqState:
-    out: None
+    out: List[dict]
     finished: bool
     event: asyncio.Event
 
@@ -187,8 +187,8 @@ class TokenizerManager:
                 # print(f"tokenizer generate request single wait for event rid: {rid}")
                 await event.wait()
                 # print(f"tokenizer generate request single wait for event done rid: {rid}")
-                yield state.out
-                state.out = None
+                yield state.out_list[-1]
+                state.out_list = []
                 if state.finished:
                     with self.lock:
                         del self.rid_to_state[rid]
@@ -241,7 +241,7 @@ class TokenizerManager:
                 # print("tokenizer generate request multiple wait for event")
                 await state.event.wait()
                 # print("tokenizer generate request multiple wait for event complete")
-                output_list.append(state.out)
+                output_list.append(state.out_list[-1])
                 assert state.finished
                 with self.lock:
                     del self.rid_to_state[rid]
@@ -274,9 +274,7 @@ class TokenizerManager:
                 with self.lock:
                     state = self.rid_to_state[rid]
 
-                assert state.out is None
-
-                state.out = out_dict
+                state.out_list.append(out_dict)
                 state.finished = recv_obj.finished[i]
                 # print(f"tokenizer state.event.set ready rid: {rid}")
                 state.event.set()
