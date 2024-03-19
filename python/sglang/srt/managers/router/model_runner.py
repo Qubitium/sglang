@@ -7,6 +7,7 @@ from pathlib import Path
 import importlib.resources
 import numpy as np
 import torch
+import triton
 from sglang.srt.layers import token_attention
 from sglang.srt.managers.router.infer_batch import Batch, ForwardMode
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
@@ -88,7 +89,7 @@ class InputMetadata:
     prefill_wrapper = None
     decode_wrapper = None
 
-    def init_flashinfer_args(self, tp_size):
+    def init_flashinfer_args(self, model_runner, tp_size):
         from flashinfer import (
             BatchDecodeWithPagedKVCacheWrapper,
             BatchPrefillWithPagedKVCacheWrapper,
@@ -153,7 +154,7 @@ class InputMetadata:
                 self.model_runner.model_config.head_dim,
                 1,
                 "NONE",
-                "float16",
+                str(model_runner.torch_dtype).split(".")[1],
             )
 
     def init_extend_args(self):
@@ -231,7 +232,7 @@ class InputMetadata:
             ret.init_extend_args()
 
         if global_server_args_dict.get("enable_flashinfer", False):
-            ret.init_flashinfer_args(tp_size)
+            ret.init_flashinfer_args(model_runner, tp_size)
 
         return ret
 
@@ -256,6 +257,10 @@ class ModelRunner:
         self.load_format = load_format
         self.trust_remote_code = trust_remote_code
 
+        # following two dtypes are modified in load_model()
+        self.torch_dtype = torch.bfloat16
+        self.triton_dtype = triton.language.bfloat16
+
         global global_server_args_dict
         global_server_args_dict = server_args_dict
 
@@ -276,8 +281,8 @@ class ModelRunner:
         total_gpu_memory = get_available_gpu_memory(
             self.tp_rank, distributed=self.tp_size > 1
         ) * (1 << 30)
-        dtype = self.load_model()
-        self.init_memory_pool(total_gpu_memory, dtype)
+        self.load_model()
+        self.init_memory_pool(total_gpu_memory, self.torch_dtype)
 
         self.is_multimodal_model = is_multimodal_model(self.model_config)
 
@@ -298,16 +303,16 @@ class ModelRunner:
 
         # quant models can only operate in  float16 and non-quant has no such limitation
         if hf_quant_config is not None:
-            torch_dtype = torch.float16
-            triton_dtype = triton.language.float16
+            self.torch_dtype = torch.float16
+            self.triton_dtype = triton.language.float16
         else:
-            torch_dtype = torch.bfloat16
-            triton_dtype = triton.language.bfloat16
+            self.torch_dtype = torch.bfloat16
+            self.triton_dtype = triton.language.bfloat16
 
-        token_attention.REDUCE_TRITON_TYPE = triton_dtype
-        token_attention.REDUCE_TORCH_TYPE = torch_dtype
+        token_attention.REDUCE_TRITON_TYPE = self.triton_dtype
+        token_attention.REDUCE_TORCH_TYPE = self.torch_dtype
 
-        with _set_default_torch_dtype(torch_dtype):
+        with _set_default_torch_dtype(self.torch_dtype):
             with torch.device("cuda"):
                 if hf_quant_config is not None:
                     hf_quant_method = hf_quant_config["quant_method"]
@@ -338,8 +343,6 @@ class ModelRunner:
         self.model = model.eval()
 
         logger.info(f"Rank {self.tp_rank}: load weight end.")
-
-        return torch_dtype
 
     def profile_max_num_token(self, total_gpu_memory):
         available_gpu_memory = get_available_gpu_memory(
