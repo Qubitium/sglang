@@ -25,7 +25,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling_params import SamplingParams
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_image
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -78,12 +78,12 @@ class TokenizerManager:
     def __init__(
             self,
             server_args: ServerArgs,
-            output_chan: multiprocessing.Queue,
             router_chan: multiprocessing.Queue,
+            detokenizer_chan: multiprocessing.Queue,
     ):
         self.server_args = server_args
-        self.output_chan = output_chan
         self.router_chan = router_chan
+        self.detokenizer_chan = detokenizer_chan
 
         self.lock = threading.Lock()
 
@@ -114,15 +114,16 @@ class TokenizerManager:
                 trust_remote_code=server_args.trust_remote_code,
             )
 
-        self.work_thread = None
+        # self.output_thread = None
+        self.decoder_thread = None
         self.rid_to_state = {}  # Dict[str -> ReqState]
 
     def start(self):
-        if self.work_thread is None:
-            print(f"tokenizer generate_request create handel loop")
+        if self.decoder_thread is None:
+            print(f"tokenizer generate_request decoder loop")
             # await self.create_handle_loop()
-            self.work_thread = threading.Thread(target=self.model_output_loop, daemon=True)
-            self.work_thread.start()
+            self.decoder_thread = threading.Thread(target=self.decoder_loop, daemon=True)
+            self.decoder_thread.start()
 
     async def get_pixel_values(self, image_data):
         aspect_ratio = getattr(self.hf_config, "image_aspect_ratio", None)
@@ -259,14 +260,50 @@ class TokenizerManager:
         # self.send_to_router.send_pyobj(flush_cache_req)
         self.router_chan.put_nowait(flush_cache_req)
 
-    def model_output_loop(self):
-        # tokenizer_get = make_async_thread(self.output_chan.get)
-
+    def decoder_loop(self):
         while True:
-            # print(f"tokenizer manager output_chan get waiting...")
-            output = self.output_chan.get()
-            # print(f"tokenizer manager output_chan get done: {recv_obj}")
+            # print(f"detokenizer detokenizer_chan get wait...")
+            recv_obj = self.detokenizer_chan.get()
+            # print(f"detokenizer detokenizer_chan get done: {recv_obj}")
 
+            output_tokens = recv_obj.output_tokens
+
+            # TODO(lmzheng): handle skip_special_tokens per request
+            output_strs = self.tokenizer.batch_decode(
+                output_tokens,
+                skip_special_tokens=recv_obj.skip_special_tokens[0],
+            )
+
+            # Trim stop str
+            # TODO(lmzheng): handle the case where multiple stop strs are hit
+            for i in range(len(output_strs)):
+                if recv_obj.hit_stop_str[i] is not None:
+                    pos = output_strs[i].find(recv_obj.hit_stop_str[i])
+                    if pos != -1:
+                        output_strs[i] = output_strs[i][:pos]
+
+                if len(output_tokens[i]) > 0:
+                    first_token = self.tokenizer.convert_ids_to_tokens(
+                        int(output_tokens[i][0])
+                    )
+                    if not isinstance(first_token, str):
+                        first_token = first_token.decode("utf-8", errors="ignore")
+                    if first_token.startswith("▁"):
+                        output_strs[i] = " " + output_strs[i]
+
+                output_strs[i] = (
+                        recv_obj.output_and_jump_forward_strs[i] + output_strs[i]
+                )
+
+            # print(f"detokenizer tokenizer_chan put")
+            output = BatchStrOut(
+                recv_obj.rids,
+                output_strs,
+                recv_obj.meta_info,
+                recv_obj.finished,
+            )
+
+            # previously in another thread/loop
             for i, rid in enumerate(output.rids):
                 output.meta_info[i]["id"] = rid
                 out_dict = {

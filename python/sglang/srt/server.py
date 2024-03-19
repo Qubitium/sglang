@@ -5,7 +5,6 @@ import dataclasses
 import json
 import multiprocessing as mp
 import os
-import queue
 import sys
 import threading
 import time
@@ -34,7 +33,6 @@ from sglang.srt.conversation import (
     register_conv_template,
 )
 from sglang.srt.hf_transformers_utils import get_tokenizer
-from sglang.srt.managers.detokenizer_manager import DetokenizerManager
 from sglang.srt.managers.io_struct import DetokenizeReqInput, GenerateReqInput
 from sglang.srt.managers.openai_protocol import (
     ChatCompletionRequest,
@@ -85,7 +83,6 @@ app = FastAPI()
 tokenizer_manager = None
 chat_template_name = None
 
-
 # FIXME: Remove this once we drop support for pydantic 1.x
 IS_PYDANTIC_1 = int(pydantic.VERSION.split(".")[0]) == 1
 
@@ -120,7 +117,7 @@ async def flush_cache():
     await tokenizer_manager.flush_cache()
     return Response(
         content="Cache flushed.\nPlease check backend logs for more details. "
-        "(When there are running or waiting requests, the operation will not be performed.)\n",
+                "(When there are running or waiting requests, the operation will not be performed.)\n",
         status_code=200,
     )
 
@@ -226,7 +223,7 @@ async def v1_completions(raw_request: Request):
                 else:
                     logprobs = None
 
-                delta = text[len(stream_buffer) :]
+                delta = text[len(stream_buffer):]
                 stream_buffer = content["text"]
                 choice_data = CompletionResponseStreamChoice(
                     index=0,
@@ -314,8 +311,8 @@ async def v1_chat_completions(raw_request: Request):
                     raise HTTPException(
                         status_code=503,
                         detail="Structured content requests not supported with "
-                        "HuggingFace Chat Templates. "
-                        "Make sure the server specifies a sglang chat template.",
+                               "HuggingFace Chat Templates. "
+                               "Make sure the server specifies a sglang chat template.",
                     )
             prompt = tokenizer_manager.tokenizer.apply_chat_template(
                 request.messages, tokenize=False, add_generation_prompt=True
@@ -377,7 +374,7 @@ async def v1_chat_completions(raw_request: Request):
                     yield f"data: {jsonify_pydantic_model(chunk)}\n\n"
 
                 text = content["text"]
-                delta = text[len(stream_buffer) :]
+                delta = text[len(stream_buffer):]
                 stream_buffer = text
                 choice_data = ChatCompletionResponseStreamChoice(
                     index=0, delta=DeltaMessage(content=delta), finish_reason=None
@@ -470,16 +467,11 @@ def launch_server(server_args, pipe_finish_writer):
 
     router_chan = mp.Queue()
     detokenizer_chan = mp.Queue()
-    output_chan = queue.Queue()
-
     startup_chan = mp.Queue()
 
     # Launch processes
-    tokenizer_manager = TokenizerManager(server_args, output_chan, router_chan)
+    tokenizer_manager = TokenizerManager(server_args, router_chan, detokenizer_chan)
     tokenizer_manager.start()
-
-    detokenizer_manager = DetokenizerManager(server_args, detokenizer_chan, output_chan)
-    detokenizer_manager.start()
 
     proc_router = mp.Process(
         target=start_router_process,
@@ -573,27 +565,27 @@ def launch_server(server_args, pipe_finish_writer):
 
 class Runtime:
     def __init__(
-        self,
-        model_path: str,
-        tokenizer_path: Optional[str] = None,
-        load_format: str = "auto",
-        tokenizer_mode: str = "auto",
-        trust_remote_code: bool = True,
-        mem_fraction_static: float = ServerArgs.mem_fraction_static,
-        max_prefill_num_token: int = ServerArgs.max_prefill_num_token,
-        context_length: int = ServerArgs.context_length,
-        tp_size: int = 1,
-        schedule_heuristic: str = "lpm",
-        attention_reduce_in_fp32: bool = False,
-        random_seed: int = 42,
-        log_level: str = "error",
-        disable_radix_cache: bool = False,
-        enable_flashinfer: bool = False,
-        disable_regex_jump_forward: bool = False,
-        disable_disk_cache: bool = False,
-        api_key: str = "",
-        port: Optional[int] = None,
-        additional_ports: Optional[Union[List[int], int]] = None,
+            self,
+            model_path: str,
+            tokenizer_path: Optional[str] = None,
+            load_format: str = "auto",
+            tokenizer_mode: str = "auto",
+            trust_remote_code: bool = True,
+            mem_fraction_static: float = ServerArgs.mem_fraction_static,
+            max_prefill_num_token: int = ServerArgs.max_prefill_num_token,
+            context_length: int = ServerArgs.context_length,
+            tp_size: int = 1,
+            schedule_heuristic: str = "lpm",
+            attention_reduce_in_fp32: bool = False,
+            random_seed: int = 42,
+            log_level: str = "error",
+            disable_radix_cache: bool = False,
+            enable_flashinfer: bool = False,
+            disable_regex_jump_forward: bool = False,
+            disable_disk_cache: bool = False,
+            api_key: str = "",
+            port: Optional[int] = None,
+            additional_ports: Optional[Union[List[int], int]] = None,
     ):
         host = "127.0.0.1"
         port, additional_ports = handle_port_init(port, additional_ports, tp_size)
@@ -666,9 +658,9 @@ class Runtime:
         )
 
     async def add_request(
-        self,
-        prompt: str,
-        sampling_params,
+            self,
+            prompt: str,
+            sampling_params,
     ) -> None:
         json_data = {
             "text": prompt,
