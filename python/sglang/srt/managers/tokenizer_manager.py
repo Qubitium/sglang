@@ -78,11 +78,11 @@ class TokenizerManager:
     def __init__(
             self,
             server_args: ServerArgs,
-            tokenizer_chan: multiprocessing.Queue,
+            output_chan: multiprocessing.Queue,
             router_chan: multiprocessing.Queue,
     ):
         self.server_args = server_args
-        self.tokenizer_chan = tokenizer_chan
+        self.output_chan = output_chan
         self.router_chan = router_chan
 
         self.lock = threading.Lock()
@@ -260,12 +260,12 @@ class TokenizerManager:
         self.router_chan.put_nowait(flush_cache_req)
 
     def model_output_loop(self):
-        # tokenizer_get = make_async_thread(self.tokenizer_chan.get)
+        # tokenizer_get = make_async_thread(self.output_chan.get)
 
         while True:
-            # print(f"tokenizer manager tokenizer_chan get waiting...")
-            output = self.tokenizer_chan.get()
-            # print(f"tokenizer manager tokenizer_chan get done: {recv_obj}")
+            # print(f"tokenizer manager output_chan get waiting...")
+            output = self.output_chan.get()
+            # print(f"tokenizer manager output_chan get done: {recv_obj}")
 
             for i, rid in enumerate(output.rids):
                 output.meta_info[i]["id"] = rid
