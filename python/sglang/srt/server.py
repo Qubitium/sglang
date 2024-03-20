@@ -468,10 +468,12 @@ def launch_server(server_args, pipe_finish_writer=None):
 
     router_chan = mp.Queue()
     detokenizer_chan = mp.Queue()
+    idle_chan = mp.Queue()
     startup_chan = mp.Queue()
 
+
     # Launch processes
-    tokenizer_manager = TokenizerManager(server_args, router_chan, detokenizer_chan)
+    tokenizer_manager = TokenizerManager(server_args, router_chan, detokenizer_chan, idle_chan)
 
     proc_router = mp.Process(
         target=start_router_process,
@@ -480,6 +482,7 @@ def launch_server(server_args, pipe_finish_writer=None):
             port_args,
             router_chan,
             detokenizer_chan,
+            idle_chan,
             startup_chan,
         ),
     )
@@ -626,7 +629,7 @@ class Runtime:
         # proc.start()
         # pipe_writer.close()
         # self.pid = proc.pid
-        self.pid = os.getgid()
+        self.pid = os.getpid()
 
         threading.Thread(target=launch_server, args=[self.server_args, None], daemon=True).start()
 

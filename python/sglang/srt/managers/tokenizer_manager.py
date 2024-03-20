@@ -83,10 +83,15 @@ class TokenizerManager:
             server_args: ServerArgs,
             router_chan: multiprocessing.Queue,
             detokenizer_chan: multiprocessing.Queue,
+            idle_chan: multiprocessing.Queue,
     ):
+        # num of pending requests
+        self.pending = 0
+
         self.server_args = server_args
         self.router_chan = router_chan
         self.detokenizer_chan = detokenizer_chan
+        self.idle_chan = idle_chan
 
         # self.lock = asyncio.Lock()
 
@@ -150,6 +155,8 @@ class TokenizerManager:
     async def generate_request(self, obj: GenerateReqInput):
         await self.start()
 
+        self.pending += 1
+
         is_single = isinstance(obj.text, str)
 
         if is_single:
@@ -204,6 +211,13 @@ class TokenizerManager:
                     async with self.lock:
                         del self.rid_to_state[rid]
                     break
+
+                self.pending -= 1
+                if self.pending == 0:
+                    print("PENDING state.finished => empty rid_stats! signal!")
+                    asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
+                else:
+                    print(f"PENDING size: {self.pending}")
                 event.clear()
         else:
             # print(f"tokenizer generate_request multiple request")
@@ -255,8 +269,16 @@ class TokenizerManager:
                 # print("tokenizer generate request multiple wait for event complete")
                 output_list.append(state.out_list[-1])
                 assert state.finished
+
                 async with self.lock:
                     del self.rid_to_state[rid]
+
+                self.pending -= 1
+                if self.pending == 0:
+                    print("PENDING state.finished => empty rid_stats! signal!")
+                    asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
+                else:
+                    print(f"PENDING size: {self.pending}")
 
             yield output_list
 
