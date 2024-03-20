@@ -46,7 +46,6 @@ class RouterManager:
 
             # use this flag to only sleep once for merge optimization
             waited = False
-            # non-blocking queue flush
             while True:
                 try:
                     if waited:
