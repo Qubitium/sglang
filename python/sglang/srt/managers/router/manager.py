@@ -40,6 +40,8 @@ class RouterManager:
                 next_step_input.append(self.router_chan.get())
                 idle = False
                 print("forward IDLE WAIT complete")
+            else:
+                print("CPU SPIN LOOP")
 
             # non-blocking queue flush
             while self.router_chan.qsize() > 0:

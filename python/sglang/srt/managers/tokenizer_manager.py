@@ -93,8 +93,6 @@ class TokenizerManager:
         self.detokenizer_chan = detokenizer_chan
         self.idle_chan = idle_chan
 
-        # self.lock = asyncio.Lock()
-
         self.model_path = server_args.model_path
         self.hf_config = get_config(
             self.model_path, trust_remote_code=server_args.trust_remote_code
@@ -124,14 +122,12 @@ class TokenizerManager:
 
         self.rid_to_state = {}  # Dict[str -> ReqState]
         self.decoder_task = None
-        self.lock = asyncio.Lock()
 
     async def start(self):
-        async with self.lock:
-            if self.decoder_task is None:
-                # TODO FIXME make sure sglang loads only the FAST tokenizers which rust based
-                print(f"tokenizer generate_request decoder loop")
-                self.decoder_task = asyncio.create_task(self.decoder_loop())
+        if self.decoder_task is None:
+            # TODO FIXME make sure sglang loads only the FAST tokenizers which rust based
+            print(f"tokenizer generate_request decoder loop")
+            self.decoder_task = asyncio.create_task(self.decoder_loop())
 
     async def get_pixel_values(self, image_data):
         aspect_ratio = getattr(self.hf_config, "image_aspect_ratio", None)
@@ -155,11 +151,11 @@ class TokenizerManager:
     async def generate_request(self, obj: GenerateReqInput):
         await self.start()
 
-        self.pending += 1
-
         is_single = isinstance(obj.text, str)
 
         if is_single:
+            self.pending += 1
+            print(f"PENDING {self.pending}")
             # print(f"tokenizer generate_request single request")
             rid = obj.rid
 
@@ -195,8 +191,7 @@ class TokenizerManager:
 
             event = asyncio.Event()
             state = ReqState([], False, event)
-            async with self.lock:
-                self.rid_to_state[rid] = state
+            self.rid_to_state[rid] = state
 
             # no need to wait
             asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
@@ -208,21 +203,26 @@ class TokenizerManager:
                 yield state.out_list[-1]
                 state.out_list = []
                 if state.finished:
-                    async with self.lock:
-                        del self.rid_to_state[rid]
+                    del self.rid_to_state[rid]
+
+                    self.pending -= 1
+                    assert self.pending >= 0
+                    if self.pending == 0:
+                        print("PENDING state.finished => empty rid_stats! signal!")
+                        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
+                    else:
+                        print(f"PENDING size: {self.pending}")
+
                     break
 
-                self.pending -= 1
-                if self.pending == 0:
-                    print("PENDING state.finished => empty rid_stats! signal!")
-                    asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
-                else:
-                    print(f"PENDING size: {self.pending}")
+
                 event.clear()
         else:
             # print(f"tokenizer generate_request multiple request")
             assert obj.stream is False
             bs = len(obj.text)
+            self.pending += bs
+            print(f"PENDING {self.pending}")
             for i in range(bs):
                 rid = obj.rid[i]
                 input_ids = self.tokenizer.encode(obj.text[i])
@@ -256,24 +256,22 @@ class TokenizerManager:
 
                 event = asyncio.Event()
                 state = ReqState([], False, event)
-                async with self.lock:
-                    self.rid_to_state[rid] = state
+                self.rid_to_state[rid] = state
 
             output_list = []
             for i in range(bs):
                 rid = obj.rid[i]
-                async with self.lock:
-                    state = self.rid_to_state[rid]
+                state = self.rid_to_state[rid]
                 # print("tokenizer generate request multiple wait for event")
                 await state.event.wait()
                 # print("tokenizer generate request multiple wait for event complete")
                 output_list.append(state.out_list[-1])
                 assert state.finished
 
-                async with self.lock:
-                    del self.rid_to_state[rid]
+                del self.rid_to_state[rid]
 
                 self.pending -= 1
+                assert self.pending >= 0
                 if self.pending == 0:
                     print("PENDING state.finished => empty rid_stats! signal!")
                     asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
@@ -343,8 +341,7 @@ class TokenizerManager:
                     "text": output.output_str[i],
                     "meta_info": output.meta_info[i],
                 }
-                async with self.lock:
-                    state = self.rid_to_state[rid]
+                state = self.rid_to_state[rid]
 
                 state.out_list.append(out_dict)
                 state.finished = output.finished[i]
