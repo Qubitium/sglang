@@ -26,7 +26,7 @@ class RouterManager:
         idle = True
         while True:
             if not idle:
-                print("forward check IDLE.....")
+                # print("forward check IDLE.....")
                 if self.idle_chan.qsize() > 0:
                     print("forward GOT IDLE signal")
                     flush_queue(self.idle_chan)
@@ -35,14 +35,14 @@ class RouterManager:
 
             next_step_input = []
 
-            # TODO FIX ME this blocks processing
             if idle:
                 print("forward IDLE WAIT")
                 next_step_input.append(self.router_chan.get())
                 idle = False
                 print("forward IDLE WAIT complete")
             else:
-                print("CPU SPIN LOOP")
+                pass
+                # print("CPU SPIN LOOP")
 
             # non-blocking queue flush
             while self.router_chan.qsize() > 0:
