@@ -44,15 +44,16 @@ class RouterManager:
                 pass
                 # print("CPU SPIN LOOP")
 
+            # use this flag to only sleep once for merge optimization
+            waited = False
             # non-blocking queue flush
-            while self.router_chan.qsize() > 0:
+            while True:
                 try:
-                    next_step_input.append(self.router_chan.get_nowait())
-                    idle = False
-                    # try to merge requests
-                    if self.router_chan.qsize() == 0:
-                        # TODO FIXME make this configurable
-                        time.sleep(0.01)
+                    if waited:
+                        next_step_input.append(self.router_chan.get(block=True, timeout=0.002))
+                    else:
+                        waited = True
+                        next_step_input.append(self.router_chan.get(block=True, timeout=0.010))
                 except queue.Empty:
                     break
 
@@ -65,13 +66,6 @@ class RouterManager:
 
             for item in output:
                 self.detokenizer_chan.put_nowait(item)
-
-            # time.sleep(0.0004)
-            # the model inference is empty
-            # if len(output) == 0:
-            #     # TODO FIXME make this configurable
-            #     # prevent spin loop causing too much cpu usage
-            #     time.sleep(0.0004)
 
 
 def start_router_process(
