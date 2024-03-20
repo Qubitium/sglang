@@ -155,7 +155,7 @@ class TokenizerManager:
 
         if is_single:
             self.pending += 1
-            print(f"PENDING {self.pending}")
+            # print(f"PENDING {self.pending}")
             # print(f"tokenizer generate_request single request")
             rid = obj.rid
 
@@ -202,10 +202,11 @@ class TokenizerManager:
             self.pending -= 1
             assert self.pending >= 0
             if self.pending == 0:
-                print("PENDING state.finished => empty rid_stats! signal!")
+                # print("PENDING state.finished => empty rid_stats! signal!")
                 asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
             else:
-                print(f"PENDING size: {self.pending}")
+                pass
+                # print(f"PENDING size: {self.pending}")
 
             assert state.finished
             del self.rid_to_state[rid]
@@ -218,7 +219,7 @@ class TokenizerManager:
             assert obj.stream is False
             bs = len(obj.text)
             self.pending += bs
-            print(f"PENDING {self.pending}")
+            # print(f"PENDING {self.pending}")
             for i in range(bs):
                 rid = obj.rid[i]
                 input_ids = self.tokenizer.encode(obj.text[i])
@@ -269,10 +270,11 @@ class TokenizerManager:
                 self.pending -= 1
                 assert self.pending >= 0
                 if self.pending == 0:
-                    print("PENDING state.finished => empty rid_stats! signal!")
+                    # print("PENDING state.finished => empty rid_stats! signal!")
                     asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
                 else:
-                    print(f"PENDING size: {self.pending}")
+                    pass
+                    # print(f"PENDING size: {self.pending}")
 
             yield output_list
 
@@ -288,9 +290,9 @@ class TokenizerManager:
     async def decoder_loop(self):
         print("in decoder_loop ")
         while True:
-            print(f"detokenizer detokenizer_chan get wait...")
+            # print(f"detokenizer detokenizer_chan get wait...")
             recv_obj = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.get)
-            print(f"detokenizer detokenizer_chan get done: {recv_obj}")
+            # print(f"detokenizer detokenizer_chan get done: {recv_obj}")
 
             output_tokens = recv_obj.output_tokens
 
