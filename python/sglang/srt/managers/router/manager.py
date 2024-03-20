@@ -28,7 +28,7 @@ class RouterManager:
             if not idle:
                 # print("forward check IDLE.....")
                 if self.idle_chan.qsize() > 0:
-                    print("forward GOT IDLE signal")
+                    # print("forward GOT IDLE signal")
                     flush_queue(self.idle_chan)
                     idle = True
 
@@ -36,23 +36,25 @@ class RouterManager:
             next_step_input = []
 
             if idle:
-                print("forward IDLE WAIT")
+                # print("forward IDLE WAIT")
                 next_step_input.append(self.router_chan.get())
                 idle = False
-                print("forward IDLE WAIT complete")
+                # print("forward IDLE WAIT complete")
             else:
                 pass
                 # print("CPU SPIN LOOP")
 
-            # use this flag to only sleep once for merge optimization
-            waited = False
+            # if not idle, model is doing work, disable wait and set to 0ms
+            wait_timeout = 0.010 if len(next_step_input) == 1 else 0.0
             while True:
                 try:
-                    if waited:
-                        next_step_input.append(self.router_chan.get(block=True, timeout=0.002))
+                    if wait_timeout < 0.0:
+                        break
+                    elif wait_timeout == 0.0:
+                        next_step_input.append(self.router_chan.get(block=False))
                     else:
-                        waited = True
-                        next_step_input.append(self.router_chan.get(block=True, timeout=0.010))
+                        next_step_input.append(self.router_chan.get(block=True, timeout=wait_timeout))
+                        wait_timeout -= 0.05
                 except queue.Empty:
                     break
 
