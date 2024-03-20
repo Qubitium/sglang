@@ -26,6 +26,7 @@ class RouterManager:
         idle = True
         while True:
             if not idle:
+                print("forward check IDLE.....")
                 if self.idle_chan.qsize() > 0:
                     print("forward GOT IDLE signal")
                     flush_queue(self.idle_chan)

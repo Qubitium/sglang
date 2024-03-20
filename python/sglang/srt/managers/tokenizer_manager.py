@@ -196,27 +196,23 @@ class TokenizerManager:
             # no need to wait
             asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
 
-            while True:
-                # print(f"tokenizer generate request single wait for event rid: {rid}")
-                await event.wait()
-                # print(f"tokenizer generate request single wait for event done rid: {rid}")
-                yield state.out_list[-1]
-                state.out_list = []
-                if state.finished:
-                    del self.rid_to_state[rid]
+            # print(f"tokenizer generate request single wait for event rid: {rid}")
+            await event.wait()
 
-                    self.pending -= 1
-                    assert self.pending >= 0
-                    if self.pending == 0:
-                        print("PENDING state.finished => empty rid_stats! signal!")
-                        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
-                    else:
-                        print(f"PENDING size: {self.pending}")
+            self.pending -= 1
+            assert self.pending >= 0
+            if self.pending == 0:
+                print("PENDING state.finished => empty rid_stats! signal!")
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
+            else:
+                print(f"PENDING size: {self.pending}")
 
-                    break
+            assert state.finished
+            del self.rid_to_state[rid]
 
+            # print(f"tokenizer generate request single wait for event done rid: {rid}")
+            yield state.out_list[-1]
 
-                event.clear()
         else:
             # print(f"tokenizer generate_request multiple request")
             assert obj.stream is False
