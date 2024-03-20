@@ -48,13 +48,11 @@ class RouterManager:
             wait_timeout = 0.010 if len(next_step_input) == 1 else 0.0
             while True:
                 try:
-                    if wait_timeout < 0.0:
-                        break
-                    elif wait_timeout == 0.0:
+                    if wait_timeout == 0.0:
                         next_step_input.append(self.router_chan.get(block=False))
                     else:
                         next_step_input.append(self.router_chan.get(block=True, timeout=wait_timeout))
-                        wait_timeout -= 0.05
+                        wait_timeout = max(0.0, wait_timeout - 0.02)
                 except queue.Empty:
                     break
 
