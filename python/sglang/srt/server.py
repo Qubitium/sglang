@@ -654,8 +654,9 @@ class Runtime:
             for child in children:
                 child.kill()
             psutil.wait_procs(children, timeout=5)
-            parent.kill()
-            parent.wait(timeout=5)
+            # FIXME Why are we killing parent?
+            # parent.kill()
+            # parent.wait(timeout=5)
             self.pid = None
 
     def get_tokenizer(self):
