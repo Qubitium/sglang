@@ -8,7 +8,7 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
 
 def flush_queue(q: mp.Queue):
-    while q.qsize() > 0:
+    while True:
         try:
             q.get_nowait()
         except queue.Empty:
