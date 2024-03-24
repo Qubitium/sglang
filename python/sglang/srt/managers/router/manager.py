@@ -12,7 +12,7 @@ def flush_queue(q: mp.Queue):
         try:
             q.get_nowait()
         except queue.Empty:
-            pass
+            break
 
 class RouterManager:
     def __init__(self, model_client: ModelClient, router_chan: mp.Queue, detokenzier_chan: mp.Queue, idle_chan: mp.Queue):
