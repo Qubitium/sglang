@@ -396,9 +396,7 @@ class ModelServer():
                 prefill_logprobs,
                 normalized_logprobs,
                 last_logprobs,
-            ) = self.model_runner.forward(
-                batch, ForwardMode.EXTEND, batch.return_logprob
-            )
+            ) = self.model_runner.forward(batch, ForwardMode.EXTEND)
             if prefill_logprobs is not None:
                 logprobs = prefill_logprobs.cpu().tolist()
                 normalized_logprobs = normalized_logprobs.cpu().tolist()
@@ -485,9 +483,7 @@ class ModelServer():
 
         # Forward
         logits, (_, _, last_logprobs) = self.model_runner.forward(
-            batch,
-            ForwardMode.DECODE,
-            batch.return_logprob,
+            batch, ForwardMode.DECODE
         )
         next_token_ids, _ = batch.sample(logits)
         next_token_ids = next_token_ids.cpu().tolist()
@@ -604,7 +600,6 @@ class ModelClient:
             # Init model
             self.model_server = ModelServer()
             self.model_server.exposed_init_model(0, server_args, port_args)
-
             # Wrap functions
             # def async_wrap(f):
             #     async def _func(*args, **kwargs):

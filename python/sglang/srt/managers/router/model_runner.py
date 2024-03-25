@@ -1,6 +1,8 @@
 import importlib
-import logging
+import importlib.resources
 import inspect
+import logging
+import pkgutil
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -37,10 +39,11 @@ global_server_args_dict: dict = None
 @lru_cache()
 def import_model_classes():
     model_arch_name_to_cls = {}
-    for f in importlib.resources.files("sglang.srt.models").iterdir():
-        if f.name.endswith(".py"):
-            module_name = Path(f.name).with_suffix('')
-            module = importlib.import_module(f"sglang.srt.models.{module_name}")
+    package_name = "sglang.srt.models"
+    package = importlib.import_module(package_name)
+    for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + "."):
+        if not ispkg:
+            module = importlib.import_module(name)
             if hasattr(module, "EntryClass"):
                 model_arch_name_to_cls[module.EntryClass.__name__] = module.EntryClass
     return model_arch_name_to_cls
@@ -145,9 +148,12 @@ class InputMetadata:
 
             # flashinfer >= 0.0.3
             # FIXME: Drop this when flashinfer updates to 0.0.4
-            if len(inspect.signature(self.prefill_wrapper.begin_forward).parameters) == 7:
+            if (
+                len(inspect.signature(self.prefill_wrapper.begin_forward).parameters)
+                == 7
+            ):
                 args.append(self.model_runner.model_config.head_dim)
-            
+
             self.prefill_wrapper.begin_forward(*args)
         else:
             self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
@@ -403,148 +409,88 @@ class ModelRunner:
         )
 
     @torch.inference_mode()
-    def forward_prefill(
-        self,
-        input_ids,
-        req_pool_indices,
-        seq_lens,
-        prefix_lens,
-        position_ids_offsets,
-        out_cache_loc,
-        return_logprob,
-    ):
+    def forward_prefill(self, batch: Batch):
         input_metadata = InputMetadata.create(
             self,
             forward_mode=ForwardMode.PREFILL,
             tp_size=self.tp_size,
-            req_pool_indices=req_pool_indices,
-            seq_lens=seq_lens,
-            prefix_lens=prefix_lens,
-            position_ids_offsets=position_ids_offsets,
-            out_cache_loc=out_cache_loc,
-            return_logprob=return_logprob,
+            req_pool_indices=batch.req_pool_indices,
+            seq_lens=batch.seq_lens,
+            prefix_lens=batch.prefix_lens,
+            position_ids_offsets=batch.position_ids_offsets,
+            out_cache_loc=batch.out_cache_loc,
+            return_logprob=batch.return_logprob,
         )
-        return self.model.forward(input_ids, input_metadata.positions, input_metadata)
+        return self.model.forward(
+            batch.input_ids, input_metadata.positions, input_metadata
+        )
 
     @torch.inference_mode()
-    def forward_extend(
-        self,
-        input_ids,
-        req_pool_indices,
-        seq_lens,
-        prefix_lens,
-        position_ids_offsets,
-        out_cache_loc,
-        return_logprob,
-    ):
+    def forward_extend(self, batch: Batch):
         input_metadata = InputMetadata.create(
             self,
             forward_mode=ForwardMode.EXTEND,
             tp_size=self.tp_size,
-            req_pool_indices=req_pool_indices,
-            seq_lens=seq_lens,
-            prefix_lens=prefix_lens,
-            position_ids_offsets=position_ids_offsets,
-            out_cache_loc=out_cache_loc,
-            return_logprob=return_logprob,
+            req_pool_indices=batch.req_pool_indices,
+            seq_lens=batch.seq_lens,
+            prefix_lens=batch.prefix_lens,
+            position_ids_offsets=batch.position_ids_offsets,
+            out_cache_loc=batch.out_cache_loc,
+            return_logprob=batch.return_logprob,
         )
-        return self.model.forward(input_ids, input_metadata.positions, input_metadata)
+        return self.model.forward(
+            batch.input_ids, input_metadata.positions, input_metadata
+        )
 
     @torch.inference_mode()
-    def forward_decode(
-        self,
-        input_ids,
-        req_pool_indices,
-        seq_lens,
-        prefix_lens,
-        position_ids_offsets,
-        out_cache_loc,
-        out_cache_cont_start,
-        out_cache_cont_end,
-        return_logprob,
-    ):
+    def forward_decode(self, batch: Batch):
         input_metadata = InputMetadata.create(
             self,
             forward_mode=ForwardMode.DECODE,
             tp_size=self.tp_size,
-            req_pool_indices=req_pool_indices,
-            seq_lens=seq_lens,
-            prefix_lens=prefix_lens,
-            position_ids_offsets=position_ids_offsets,
-            out_cache_loc=out_cache_loc,
-            out_cache_cont_start=out_cache_cont_start,
-            out_cache_cont_end=out_cache_cont_end,
-            return_logprob=return_logprob,
+            req_pool_indices=batch.req_pool_indices,
+            seq_lens=batch.seq_lens,
+            prefix_lens=batch.prefix_lens,
+            position_ids_offsets=batch.position_ids_offsets,
+            out_cache_loc=batch.out_cache_loc,
+            out_cache_cont_start=batch.out_cache_cont_start,
+            out_cache_cont_end=batch.out_cache_cont_end,
+            return_logprob=batch.return_logprob,
         )
-        return self.model.forward(input_ids, input_metadata.positions, input_metadata)
+        return self.model.forward(
+            batch.input_ids, input_metadata.positions, input_metadata
+        )
 
     @torch.inference_mode()
-    def forward_extend_multi_modal(
-        self,
-        input_ids,
-        pixel_values,
-        image_sizes,
-        image_offsets,
-        req_pool_indices,
-        seq_lens,
-        prefix_lens,
-        position_ids_offsets,
-        out_cache_loc,
-        return_logprob,
-    ):
+    def forward_extend_multi_modal(self, batch: Batch):
         input_metadata = InputMetadata.create(
             self,
             forward_mode=ForwardMode.EXTEND,
             tp_size=self.tp_size,
-            req_pool_indices=req_pool_indices,
-            seq_lens=seq_lens,
-            prefix_lens=prefix_lens,
-            position_ids_offsets=position_ids_offsets,
-            out_cache_loc=out_cache_loc,
-            return_logprob=return_logprob,
+            req_pool_indices=batch.req_pool_indices,
+            seq_lens=batch.seq_lens,
+            prefix_lens=batch.prefix_lens,
+            position_ids_offsets=batch.position_ids_offsets,
+            out_cache_loc=batch.out_cache_loc,
+            return_logprob=batch.return_logprob,
         )
         return self.model.forward(
-            input_ids,
+            batch.input_ids,
             input_metadata.positions,
             input_metadata,
-            pixel_values,
-            image_sizes,
-            image_offsets,
+            batch.pixel_values,
+            batch.image_sizes,
+            batch.image_offsets,
         )
 
-    def forward(self, batch: Batch, forward_mode: ForwardMode, return_logprob=False):
+    def forward(self, batch: Batch, forward_mode: ForwardMode):
         if self.is_multimodal_model and forward_mode == ForwardMode.EXTEND:
-            kwargs = {
-                "input_ids": batch.input_ids,
-                "pixel_values": batch.pixel_values,
-                "image_sizes": batch.image_sizes,
-                "image_offsets": batch.image_offsets,
-                "req_pool_indices": batch.req_pool_indices,
-                "seq_lens": batch.seq_lens,
-                "prefix_lens": batch.prefix_lens,
-                "position_ids_offsets": batch.position_ids_offsets,
-                "out_cache_loc": batch.out_cache_loc,
-                "return_logprob": return_logprob,
-            }
-            return self.forward_extend_multi_modal(**kwargs)
-        else:
-            kwargs = {
-                "input_ids": batch.input_ids,
-                "req_pool_indices": batch.req_pool_indices,
-                "seq_lens": batch.seq_lens,
-                "prefix_lens": batch.prefix_lens,
-                "position_ids_offsets": batch.position_ids_offsets,
-                "out_cache_loc": batch.out_cache_loc,
-                "return_logprob": return_logprob,
-            }
-
-        if forward_mode == ForwardMode.DECODE:
-            kwargs["out_cache_cont_start"] = batch.out_cache_cont_start
-            kwargs["out_cache_cont_end"] = batch.out_cache_cont_end
-            return self.forward_decode(**kwargs)
+            return self.forward_extend_multi_modal(batch)
+        elif forward_mode == ForwardMode.DECODE:
+            return self.forward_decode(batch)
         elif forward_mode == ForwardMode.EXTEND:
-            return self.forward_extend(**kwargs)
+            return self.forward_extend(batch)
         elif forward_mode == ForwardMode.PREFILL:
-            return self.forward_prefill(**kwargs)
+            return self.forward_prefill(batch)
         else:
             raise ValueError(f"Invaid forward mode: {forward_mode}")
