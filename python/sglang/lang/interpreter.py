@@ -573,6 +573,7 @@ class StreamExecutor:
             "top_k",
             "frequency_penalty",
             "presence_penalty",
+            "repetition_penalty",
             "ignore_eos",
             "dtype",
             "regex",

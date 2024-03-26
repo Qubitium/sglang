@@ -176,6 +176,7 @@ class Batch:
     top_ks: torch.Tensor = None
     frequency_penalties: torch.Tensor = None
     presence_penalties: torch.Tensor = None
+    repetition_penalties: torch.Tensor = None
     logit_bias: torch.Tensor = None
 
     @classmethod
@@ -285,6 +286,11 @@ class Batch:
         )
         self.presence_penalties = torch.tensor(
             [r.sampling_params.presence_penalty for r in reqs],
+            dtype=torch.float,
+            device=device,
+        )
+        self.repetition_penalties = torch.tensor(
+            [r.sampling_params.repetition_penalty for r in reqs],
             dtype=torch.float,
             device=device,
         )
@@ -423,6 +429,7 @@ class Batch:
             "top_ks",
             "frequency_penalties",
             "presence_penalties",
+            "repetition_penalties",
             "logit_bias",
         ]:
             setattr(self, item, getattr(self, item)[new_indices])
@@ -447,6 +454,7 @@ class Batch:
             "top_ks",
             "frequency_penalties",
             "presence_penalties",
+            "repetition_penalties",
             "logit_bias",
         ]:
             setattr(

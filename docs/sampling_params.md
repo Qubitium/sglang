@@ -35,6 +35,7 @@ class SamplingParams:
         top_k: int = -1,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
+        repetition_penalty: float = 1.0,
         ignore_eos: bool = False,
         skip_special_tokens: bool = True,
         dtype: Optional[str] = None,

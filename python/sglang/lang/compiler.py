@@ -132,6 +132,7 @@ class CompiledFunction:
         top_k: int = -1,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
+        repetition_penalty: float = 1.0,
         backend=None,
         **kwargs,
     ):
@@ -147,6 +148,7 @@ class CompiledFunction:
             top_k=top_k,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
+            repetition_penalty=repetition_penalty,
         )
 
         return self.run_internal(backend, kwargs, default_sampling_para)
@@ -162,6 +164,7 @@ class CompiledFunction:
         top_k: int = -1,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
+        repetition_penalty: float = 1.0,
         backend=None,
         num_threads: Union[str, int] = "auto",
     ):
@@ -180,6 +183,7 @@ class CompiledFunction:
             top_k=top_k,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
+            repetition_penalty=repetition_penalty,
         )
 
         # Extract prefix by tracing and cache it

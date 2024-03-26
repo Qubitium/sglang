@@ -15,6 +15,7 @@ class SamplingParams:
         top_k: int = -1,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
+        repetition_penalty: float = 1.0,
         ignore_eos: bool = False,
         skip_special_tokens: bool = True,
         dtype: Optional[str] = None,
@@ -25,6 +26,7 @@ class SamplingParams:
         self.top_k = top_k
         self.frequency_penalty = frequency_penalty
         self.presence_penalty = presence_penalty
+        self.repetition_penalty = repetition_penalty
         self.stop_strs = stop
         self.max_new_tokens = max_new_tokens
         self.ignore_eos = ignore_eos
@@ -60,6 +62,10 @@ class SamplingParams:
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError(
                 "presence_penalty must be in [-2, 2], got " f"{self.presence_penalty}."
+            )
+        if not 0.0 < self.repetition_penalty <= 2.0:
+            raise ValueError(
+                "repetition_penalty must be in (0, 2], got " f"{self.repetition_penalty}."
             )
         if self.max_new_tokens < 0:
             raise ValueError(

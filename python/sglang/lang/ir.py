@@ -22,6 +22,7 @@ class SglSamplingParams:
     top_k: int = -1  # -1 means disable
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
+    repetition_penalty: float = 1.0
     ignore_eos: bool = False
 
     # for constrained generation, not included in to_xxx_kwargs
@@ -37,10 +38,11 @@ class SglSamplingParams:
             self.top_k,
             self.frequency_penalty,
             self.presence_penalty,
+            self.repetition_penalty,
         )
 
     def to_openai_kwargs(self):
-        # OpenAI does not support top_k, so we drop it here
+        # OpenAI does not support top_k and repetition_penalty, so we drop it here
         if self.regex is not None:
             warnings.warn("Regular expression is not supported in the OpenAI backend.")
         return {
@@ -91,6 +93,7 @@ class SglSamplingParams:
             "top_k": self.top_k,
             "frequency_penalty": self.frequency_penalty,
             "presence_penalty": self.presence_penalty,
+            "repetition_penalty": self.repetition_penalty,
             "ignore_eos": self.ignore_eos,
             "regex": self.regex,
         }
@@ -124,6 +127,7 @@ class SglFunction:
         top_k: int = -1,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
+        repetition_penalty: float = 1.0,
         ignore_eos: bool = False,
         stream: bool = False,
         backend=None,
@@ -139,6 +143,7 @@ class SglFunction:
             top_k=top_k,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
+            repetition_penalty=repetition_penalty,
             ignore_eos=ignore_eos,
         )
         backend = backend or global_config.default_backend
@@ -155,6 +160,7 @@ class SglFunction:
         top_k: int = -1,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
+        repetition_penalty: float = 1.0,
         ignore_eos: bool = False,
         backend=None,
         num_threads: Union[str, int] = "auto",
@@ -175,6 +181,7 @@ class SglFunction:
             top_k=top_k,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
+            repetition_penalty=repetition_penalty,
             ignore_eos=ignore_eos,
         )
         backend = backend or global_config.default_backend
@@ -347,6 +354,7 @@ class SglGen(SglExpr):
         top_k,
         frequency_penalty,
         presence_penalty,
+        repetition_penalty,
         ignore_eos,
         dtype,
         regex,
@@ -361,6 +369,7 @@ class SglGen(SglExpr):
             top_k=top_k,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
+            repetition_penalty=repetition_penalty,
             ignore_eos=ignore_eos,
             dtype=dtype,
             regex=regex,
