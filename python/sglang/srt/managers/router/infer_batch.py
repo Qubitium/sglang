@@ -20,6 +20,19 @@ class FinishReason(Enum):
     STOP_STR = auto()
 
 
+# Referring to RepetitionPenaltyLogitsProcessor.
+# see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py#L338
+def apply_repetition_penalty(penalty, input_ids: torch.LongTensor,
+                             scores: torch.Tensor) -> torch.Tensor:
+    score = torch.gather(scores, 1, input_ids)
+
+    # if score < 0 then repetition penalty has to be multiplied to reduce the token probabilities
+    score = torch.where(score < 0, score * penalty, score / penalty)
+
+    scores.scatter_(1, input_ids, score)
+    return scores
+
+
 class Req:
     def __init__(self, rid, input_text, input_ids):
         self.rid = rid
@@ -178,6 +191,9 @@ class Batch:
     presence_penalties: torch.Tensor = None
     repetition_penalties: torch.Tensor = None
     logit_bias: torch.Tensor = None
+
+    # for repetition_penalty
+    output_tokens: torch.LongTensor = None
 
     @classmethod
     def init_new(cls, reqs, req_to_token_pool, token_to_kv_pool, tree_cache):
@@ -464,6 +480,13 @@ class Batch:
     def sample(self, logits: torch.Tensor):
         # Post process logits
         logits = logits.contiguous()
+
+        # Referring to the transformers execution order, repetition_penalty should come before temperatures.
+        # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
+        if self.output_tokens is not None:
+            # TODO FIXME use self.repetition_penalties instead of fixed value
+            logits = apply_repetition_penalty(1.04, self.output_tokens, logits)
+
         logits.div_(self.temperatures)
         logits.add_(self.logit_bias)
 

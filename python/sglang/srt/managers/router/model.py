@@ -438,6 +438,11 @@ class ModelServer():
         self.handle_finished_requests(batch)
 
     def forward_decode_batch(self, batch: Batch):
+        output_ids = [r.output_ids[:] for r in batch.reqs]
+        batch.output_tokens = torch.tensor(
+            output_ids, dtype=torch.long, device="cuda"
+        )
+
         # check if decode out of memory
         if not batch.check_decode_mem():
             old_ratio = self.new_token_ratio
