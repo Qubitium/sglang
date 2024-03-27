@@ -386,7 +386,7 @@ class ModelServer():
     def forward_fill_batch(self, batch: Batch):
         # Build batch tensors
         batch.prepare_for_extend(
-            self.model_config.vocab_size, self.int_token_logit_bias
+            self.model_config.vocab_size, self.int_token_logit_bias, self.model_runner.torch_dtype
         )
 
         logprobs = None

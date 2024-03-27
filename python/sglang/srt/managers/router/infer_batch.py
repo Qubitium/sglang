@@ -210,7 +210,7 @@ class Batch:
     def is_empty(self):
         return len(self.reqs) == 0
 
-    def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor):
+    def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor, logits_dtype: torch.dtype):
         device = "cuda"
         bs = len(self.reqs)
         reqs = self.reqs
@@ -307,7 +307,7 @@ class Batch:
         )
         self.repetition_penalties = torch.tensor(
             [r.sampling_params.repetition_penalty for r in reqs],
-            dtype=torch.bfloat16,
+            dtype=logits_dtype,
             device=device,
         ).view(-1, 1)
         self.logit_bias = logit_bias
