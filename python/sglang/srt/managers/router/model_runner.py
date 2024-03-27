@@ -21,15 +21,7 @@ from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.model_loader import _set_default_torch_dtype
 from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
 
-QUANT_METHOD_FORMAT_TO_CONFIG = {
-    "awq": {
-        "awq": AWQConfig
-    },
-    "gptq": {
-        "gptq": GPTQConfig,
-        "marlin": MarlinConfig,
-    }
-}
+QUANTIONCONFIG_MAPPING = {"awq": AWQConfig, "gptq": GPTQConfig, "marlin": MarlinConfig}
 
 logger = logging.getLogger("model_runner")
 
@@ -341,7 +333,7 @@ class ModelRunner:
             if is_method_marlin or (is_method_gptq and is_format_marlin):
                 quant_method = "marlin"
 
-            quant_config_class = QUANT_METHOD_FORMAT_TO_CONFIG.get(quant_method)
+            quant_config_class = QUANTIONCONFIG_MAPPING.get(quant_method)
 
             if quant_config_class is None:
                 raise ValueError(f"Unsupported quantization method: {quant_method}")
