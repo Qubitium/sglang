@@ -326,42 +326,32 @@ class ModelRunner:
         token_attention.REDUCE_TRITON_TYPE = self.triton_dtype
         token_attention.REDUCE_TORCH_TYPE = self.torch_dtype
 
+        # load quant linear_method
+        if quant_cfg is not None:
+            quant_method = quant_cfg.get("quant_method", "").lower()
+            is_method_gptq = quant_method == "gptq"
+            # compat: some hf models use quant_method=marlin
+            is_method_marlin = quant_method == "marlin"
+            # compat: autogptq >0.7.1 use checkpoint_format: str
+            # compat: autogptq <=0.71 is_marlin_format: bool
+            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
+                                or quant_cfg.get("is_marlin_format"))
+
+            # Use marlin if the GPTQ model is serialized in marlin format.
+            if is_method_marlin or (is_method_gptq and is_format_marlin):
+                quant_method = "marlin"
+
+            quant_config_class = QUANT_METHOD_FORMAT_TO_CONFIG.get(quant_method)
+
+            if quant_config_class is None:
+                raise ValueError(f"Unsupported quantization method: {quant_method}")
+
+            quant_config = quant_config_class.from_config(quant_cfg)
+            logger.info(f"quant_config: {quant_config}")
+            linear_method = quant_config.get_linear_method()
+
         with _set_default_torch_dtype(self.torch_dtype):
             with torch.device("cuda"):
-                if quant_cfg is not None:
-                    # latest gptq uses "method" so both "quant_method" and "method" are loaded in priority order
-                    quant_method = quant_cfg.get("method", quant_cfg.get("quant_method", "gptq")).lower()
-
-                    # latest autogptq use "format" to unify multiple formats for same quant method
-                    quant_format = quant_cfg.get("format", quant_method).lower()
-
-                    # compat: with older models that store marlin in "is_marlin_format" or "method" field
-                    if quant_cfg.get("is_marlin_format", False) or quant_method == "marlin":
-                        quant_method = "gptq"
-                        quant_format = "marlin"
-
-                    supported_formats = QUANT_METHOD_FORMAT_TO_CONFIG.get(quant_method)
-                    if supported_formats is None:
-                        raise ValueError(
-                            f"Unsupported quantization method: {quant_method}"
-                        )
-
-                    quant_config_cls = supported_formats.get(quant_format)
-                    if quant_config_cls is None:
-                        raise ValueError(
-                            f"Unsupported quantization: method: {quant_method}, format: {quant_format}"
-                        )
-
-                    # normalize quant_cfg
-                    quant_cfg.pop("quant_method", None)
-                    quant_cfg.pop("is_marlin_format", None)
-                    quant_cfg["method"] = quant_method
-                    quant_cfg["format"] = quant_format
-                    logger.info(f"quant_config params: {quant_cfg}")
-
-                    quant_config = quant_config_cls.from_config(quant_cfg)
-                    logger.info(f"quant_config: {quant_config}")
-                    linear_method = quant_config.get_linear_method()
                 model = model_class(
                     config=self.model_config.hf_config, linear_method=linear_method
                 )
