@@ -22,14 +22,14 @@ class FinishReason(Enum):
 
 # Referring to RepetitionPenaltyLogitsProcessor.
 # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py#L338
-def apply_repetition_penalty(penalty, input_ids: torch.LongTensor,
+def apply_repetition_penalty(penalty, input_ids: torch.Tensor,
                              scores: torch.Tensor) -> torch.Tensor:
-    score = torch.gather(scores, 1, input_ids)
+    score = torch.gather(scores, 0, input_ids)
 
     # if score < 0 then repetition penalty has to be multiplied to reduce the token probabilities
     score = torch.where(score < 0, score * penalty, score / penalty)
 
-    scores.scatter_(1, input_ids, score)
+    scores.scatter_(0, input_ids, score)
     return scores
 
 
@@ -484,8 +484,8 @@ class Batch:
         # Referring to the transformers execution order, repetition_penalty should come before temperatures.
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
         if self.output_tokens is not None:
-            # TODO FIXME use self.repetition_penalties instead of fixed value
-            logits = apply_repetition_penalty(1.04, self.output_tokens, logits)
+            for i, repetition_penalty in enumerate(self.repetition_penalties):
+                apply_repetition_penalty(repetition_penalty, self.output_tokens[i], logits[i])
 
         logits.div_(self.temperatures)
         logits.add_(self.logit_bias)
