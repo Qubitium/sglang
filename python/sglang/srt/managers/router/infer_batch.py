@@ -262,11 +262,13 @@ class Batch:
             ] = out_cache_loc[pt : pt + extend_lens[i]]
             pt += extend_lens[i]
 
-        # Handle logit bias
-        logit_bias = torch.zeros((bs, vocab_size), dtype=torch.float32, device=device)
-        for i in range(bs):
-            if reqs[i].sampling_params.dtype == "int":
-                logit_bias[i] = int_token_logit_bias
+        if any(req.sampling_params.dtype == "int" for req in reqs[:bs]):
+            logit_bias = torch.zeros((bs, vocab_size), dtype=torch.float32, device=device)
+            for i in range(bs):
+                if reqs[i].sampling_params.dtype == "int":
+                    logit_bias[i] = int_token_logit_bias
+        else:
+            logit_bias = None
 
         # Set fields
         self.input_ids = torch.tensor(
@@ -448,7 +450,10 @@ class Batch:
             "repetition_penalties",
             "logit_bias",
         ]:
-            setattr(self, item, getattr(self, item)[new_indices])
+            val = getattr(self, item)
+            # bias can be None
+            if val is not None:
+                setattr(self, item, val[new_indices])
 
     def merge(self, other):
         self.reqs.extend(other.reqs)
@@ -487,7 +492,9 @@ class Batch:
             apply_repetition_penalty(self.repetition_penalties, self.output_tokens, logits)
 
         logits.div_(self.temperatures)
-        logits.add_(self.logit_bias)
+
+        if self.logit_bias is not None:
+            logits.add_(self.logit_bias)
 
         has_regex = any(req.regex_fsm is not None for req in self.reqs)
         if has_regex:
