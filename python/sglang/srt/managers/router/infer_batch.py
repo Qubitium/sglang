@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import List
@@ -263,9 +264,11 @@ class Batch:
             pt += extend_lens[i]
 
         # Handle logit bias
-        logit_bias = torch.zeros((bs, vocab_size), dtype=torch.float32, device="cpu")
+        logit_bias = None
         for i in range(bs):
             if reqs[i].sampling_params.dtype == "int":
+                if logit_bias is None:
+                    logit_bias = torch.zeros((bs, vocab_size), dtype=torch.float32, device="cpu")
                 logit_bias[i] = int_token_logit_bias
 
         # Set fields
@@ -446,7 +449,7 @@ class Batch:
             "frequency_penalties",
             "presence_penalties",
             "repetition_penalties",
-            "logit_bias",
+            # "logit_bias",
         ]:
             setattr(self, item, getattr(self, item)[new_indices])
 
@@ -471,7 +474,7 @@ class Batch:
             "frequency_penalties",
             "presence_penalties",
             "repetition_penalties",
-            "logit_bias",
+            # "logit_bias",
         ]:
             setattr(
                 self, item, torch.concat([getattr(self, item), getattr(other, item)])
@@ -487,7 +490,8 @@ class Batch:
             apply_repetition_penalty(self.repetition_penalties, self.output_tokens, logits)
 
         logits.div_(self.temperatures)
-        logits.add_(self.logit_bias)
+        if self.logit_bias is not None:
+            logits.add_(self.logit_bias)
 
         has_regex = any(req.regex_fsm is not None for req in self.reqs)
         if has_regex:

@@ -491,6 +491,7 @@ class ModelServer():
             batch, ForwardMode.DECODE
         )
         next_token_ids, _ = batch.sample(logits)
+        # print("decode", next_token_ids, last_logprobs)
         next_token_ids = next_token_ids.cpu().tolist()
 
         # Only batch transfer the selected logprobs of the next token to CPU to reduce overhead.
