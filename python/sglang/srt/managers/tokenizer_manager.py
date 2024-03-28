@@ -4,9 +4,7 @@ import dataclasses
 import multiprocessing
 import multiprocessing as mp
 import os
-import threading
 from typing import List
-from sglang.srt.utils import make_async_thread
 import numpy as np
 import transformers
 import uvloop
@@ -126,7 +124,7 @@ class TokenizerManager:
     async def start(self):
         if self.decoder_task is None:
             # TODO FIXME make sure sglang loads only the FAST tokenizers which rust based
-            print(f"tokenizer generate_request decoder loop")
+            print("tokenizer generate_request decoder loop")
             self.decoder_task = asyncio.create_task(self.decoder_loop())
 
     async def get_pixel_values(self, image_data):

@@ -1,11 +1,9 @@
 import argparse
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import json
 import time
 
-import numpy as np
 from tqdm import tqdm
 from sglang.test.test_utils import add_common_other_args_and_parse, call_generate_lightllm, call_generate_vllm, call_generate_srt_raw
 from sglang.utils import read_jsonl, dump_state_text

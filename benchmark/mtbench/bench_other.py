@@ -7,7 +7,6 @@ import time
 import uuid
 
 from fastchat.model import get_conversation_template
-import requests
 from sglang.test.test_utils import add_common_other_args_and_parse, call_generate_lightllm, call_generate_vllm, call_generate_srt
 
 

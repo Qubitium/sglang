@@ -13,7 +13,7 @@ from sglang.srt.mm_utils import (
 )
 from sglang.srt.models.llama2 import LlamaForCausalLM
 from torch import nn
-from transformers import CLIPVisionModel, LlamaConfig, LlavaConfig
+from transformers import CLIPVisionModel, LlavaConfig
 from transformers.models.llava.modeling_llava import LlavaMultiModalProjector
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.weight_utils import (

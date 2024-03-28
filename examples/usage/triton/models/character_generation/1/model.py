@@ -1,7 +1,7 @@
 import triton_python_backend_utils as pb_utils
 import numpy
 import sglang as sgl
-from sglang import function, set_default_backend
+from sglang import function
 from sglang.srt.constrained import build_regex_from_object
 
 from pydantic import BaseModel

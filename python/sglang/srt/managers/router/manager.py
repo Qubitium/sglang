@@ -1,7 +1,6 @@
 import logging
 import multiprocessing as mp
 import queue
-import time
 
 from sglang.srt.managers.router.model import ModelClient
 from sglang.srt.server_args import PortArgs, ServerArgs

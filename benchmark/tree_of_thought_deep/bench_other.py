@@ -1,6 +1,5 @@
 import argparse
 import ast
-import asyncio
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial

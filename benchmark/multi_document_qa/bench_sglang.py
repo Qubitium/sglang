@@ -2,7 +2,6 @@ import argparse
 import json
 import time
 
-import numpy as np
 import sglang as sgl
 from sglang.test.test_utils import add_common_sglang_args_and_parse, select_sglang_backend
 from sglang.utils import read_jsonl, dump_state_text

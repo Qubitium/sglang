@@ -7,7 +7,6 @@ import sglang as sgl
 import tqdm
 from sglang.test.test_utils import add_common_sglang_args_and_parse, select_sglang_backend
 from sglang.utils import read_jsonl, dump_state_text
-from PIL import Image
 
 
 @sgl.function

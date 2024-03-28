@@ -18,12 +18,10 @@ import aiohttp
 import psutil
 import pydantic
 import requests
-import uvicorn
 import uvloop
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
-from sglang.backend.runtime_endpoint import RuntimeEndpoint
 from sglang.srt.constrained import disable_cache
 from sglang.srt.conversation import (
     Conversation,
@@ -524,7 +522,7 @@ def launch_server(server_args, pipe_finish_writer=None):
             try:
                 requests.get(url + "/get_model_info", timeout=5, headers=headers)
                 break
-            except requests.exceptions.RequestException as e:
+            except requests.exceptions.RequestException:
                 pass
         else:
             if pipe_finish_writer is not None:

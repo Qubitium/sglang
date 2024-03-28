@@ -5,8 +5,6 @@ import logging
 import pkgutil
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
-import importlib.resources
 import numpy as np
 import torch
 import triton
