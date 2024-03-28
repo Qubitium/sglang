@@ -263,7 +263,7 @@ class Batch:
             pt += extend_lens[i]
 
         # Handle logit bias
-        logit_bias = torch.zeros((bs, vocab_size), dtype=torch.float32, device=device)
+        logit_bias = torch.zeros((bs, vocab_size), dtype=torch.float32, device="cpu")
         for i in range(bs):
             if reqs[i].sampling_params.dtype == "int":
                 logit_bias[i] = int_token_logit_bias
@@ -287,28 +287,28 @@ class Batch:
         self.temperatures = torch.tensor(
             [r.sampling_params.temperature for r in reqs],
             dtype=torch.float,
-            device=device,
+            device="cpu",
         ).view(-1, 1)
         self.top_ps = torch.tensor(
-            [r.sampling_params.top_p for r in reqs], dtype=torch.float, device=device
+            [r.sampling_params.top_p for r in reqs], dtype=torch.float, device="cpu"
         ).view(-1, 1)
         self.top_ks = torch.tensor(
-            [r.sampling_params.top_k for r in reqs], dtype=torch.int, device=device
+            [r.sampling_params.top_k for r in reqs], dtype=torch.int, device="cpu"
         ).view(-1, 1)
         self.frequency_penalties = torch.tensor(
             [r.sampling_params.frequency_penalty for r in reqs],
             dtype=torch.float,
-            device=device,
+            device="cpu",
         )
         self.presence_penalties = torch.tensor(
             [r.sampling_params.presence_penalty for r in reqs],
             dtype=torch.float,
-            device=device,
+            device="cpu",
         )
         self.repetition_penalties = torch.tensor(
             [r.sampling_params.repetition_penalty for r in reqs],
             dtype=logits_dtype,
-            device=device,
+            device="cpu",
         ).view(-1, 1)
         self.logit_bias = logit_bias
 
@@ -430,7 +430,7 @@ class Batch:
 
     def filter_batch(self, unfinished_indices: List[int]):
         self.reqs = [self.reqs[i] for i in unfinished_indices]
-        new_indices = torch.tensor(unfinished_indices, dtype=torch.int32, device="cuda")
+        new_indices = torch.tensor(unfinished_indices, dtype=torch.int32, device="cpu")
         self.seq_lens = self.seq_lens[new_indices]
         self.input_ids = None
         self.req_pool_indices = self.req_pool_indices[new_indices]
@@ -479,8 +479,8 @@ class Batch:
 
     def sample(self, logits: torch.Tensor):
         # Post process logits
-        logits = logits.contiguous()
-
+        # logits = logits.contiguous()
+        logits = logits.clone().cpu()
         # Referring to the transformers execution order, repetition_penalty should come before temperatures.
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
         if self.output_tokens is not None:
