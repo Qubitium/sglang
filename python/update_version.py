@@ -15,6 +15,5 @@ def update_version_in_pyproject(file_path: str):
 
     print(f"Version updated to {new_version}")
 
-# 指定pyproject.toml文件的路径
-file_path = "pyproject.toml"
+file_path = "/root/sglang/python/pyproject.toml"
 update_version_in_pyproject(file_path)
