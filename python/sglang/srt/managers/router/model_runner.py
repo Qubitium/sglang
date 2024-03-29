@@ -6,6 +6,7 @@ import pkgutil
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import List
+
 import numpy as np
 import torch
 import triton
@@ -24,8 +25,10 @@ QUANTIONCONFIG_MAPPING = {"awq": AWQConfig, "gptq": GPTQConfig, "marlin": Marlin
 
 logger = logging.getLogger("model_runner")
 
+
 # for server args in model endpoints
 global_server_args_dict: dict = None
+
 
 @lru_cache()
 def import_model_classes():
