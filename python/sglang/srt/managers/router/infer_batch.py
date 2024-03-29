@@ -23,13 +23,13 @@ class FinishReason(Enum):
 # Referring to RepetitionPenaltyLogitsProcessor.
 # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py#L338
 def apply_repetition_penalty(penalty, input_ids: torch.Tensor,
-                             scores: torch.Tensor) -> torch.Tensor:
-    score = torch.gather(scores, 1, input_ids)
+                             scores: torch.Tensor, dim=1) -> torch.Tensor:
+    score = torch.gather(scores, dim, input_ids)
 
     # if score < 0 then repetition penalty has to be multiplied to reduce the token probabilities
     score = torch.where(score < 0, score * penalty, score / penalty)
 
-    scores.scatter_(1, input_ids, score)
+    scores.scatter_(dim, input_ids, score)
     return scores
 
 
@@ -94,10 +94,10 @@ class Req:
         if first_token.startswith("▁"):
             old_output_str = " " + old_output_str
         new_input_string = (
-            self.input_text
-            + self.output_and_jump_forward_str
-            + old_output_str
-            + jump_forward_str
+                self.input_text
+                + self.output_and_jump_forward_str
+                + old_output_str
+                + jump_forward_str
         )
         new_input_ids = self.tokenizer.encode(new_input_string)
         if self.pixel_values is not None:
@@ -105,7 +105,7 @@ class Req:
             jump_forward_tokens_len = len(self.tokenizer.encode(jump_forward_str))
         else:
             jump_forward_tokens_len = (
-                len(new_input_ids) - len(self.input_ids) - len(self.output_ids)
+                    len(new_input_ids) - len(self.input_ids) - len(self.output_ids)
             )
 
         # print("=" * 100)
@@ -120,7 +120,7 @@ class Req:
         )
         self.regex_fsm_state = next_state
         self.output_and_jump_forward_str = (
-            self.output_and_jump_forward_str + old_output_str + jump_forward_str
+                self.output_and_jump_forward_str + old_output_str + jump_forward_str
         )
 
         # print(f"Output and jump forward str:\n{self.output_and_jump_forward_str}")
@@ -136,8 +136,8 @@ class Req:
             return
 
         if (
-            self.output_ids[-1] == self.tokenizer.eos_token_id
-            and self.sampling_params.ignore_eos == False
+                self.output_ids[-1] == self.tokenizer.eos_token_id
+                and self.sampling_params.ignore_eos == False
         ):
             self.finished = True
             self.finish_reason = FinishReason.EOS_TOKEN
@@ -145,7 +145,7 @@ class Req:
 
         if len(self.sampling_params.stop_strs) > 0:
             tail_str = self.tokenizer.decode(
-                self.output_ids[-(self.sampling_params.stop_str_max_len + 1) :]
+                self.output_ids[-(self.sampling_params.stop_str_max_len + 1):]
             )
 
             for stop_str in self.sampling_params.stop_strs:
@@ -220,7 +220,7 @@ class Batch:
         device = "cuda"
         bs = len(self.reqs)
         reqs = self.reqs
-        input_ids = [r.input_ids[len(r.prefix_indices) :] for r in reqs]
+        input_ids = [r.input_ids[len(r.prefix_indices):] for r in reqs]
         prefix_indices = [r.prefix_indices for r in reqs]
 
         # Handle prefix
@@ -240,7 +240,7 @@ class Batch:
             else:
                 prefix_lens.append(len(prefix_indices[i]))
                 self.req_to_token_pool.req_to_token[req_pool_indices_cpu[i]][
-                    : len(prefix_indices[i])
+                : len(prefix_indices[i])
                 ] = prefix_indices[i]
 
             seq_lens.append(prefix_lens[-1] + extend_lens[-1])
@@ -264,8 +264,8 @@ class Batch:
         pt = 0
         for i in range(bs):
             self.req_to_token_pool.req_to_token[req_pool_indices_cpu[i]][
-                prefix_lens[i] : prefix_lens[i] + extend_lens[i]
-            ] = out_cache_loc[pt : pt + extend_lens[i]]
+            prefix_lens[i]: prefix_lens[i] + extend_lens[i]
+            ] = out_cache_loc[pt: pt + extend_lens[i]]
             pt += extend_lens[i]
 
         if any(req.sampling_params.dtype == "int" for req in reqs[:bs]):
@@ -358,8 +358,8 @@ class Batch:
             # TODO: apply more fine-grained retraction
 
             token_indices = self.req_to_token_pool.req_to_token[
-                req_pool_indices_np[idx]
-            ][: seq_lens_np[idx]]
+                                req_pool_indices_np[idx]
+                            ][: seq_lens_np[idx]]
             self.token_to_kv_pool.free(token_indices)
 
         self.filter_batch(sorted_indices)
@@ -386,8 +386,8 @@ class Batch:
                         req_pool_indices_cpu = self.req_pool_indices.cpu().tolist()
                     req_pool_idx = req_pool_indices_cpu[i]
                     indices = self.req_to_token_pool.req_to_token[
-                        req_pool_idx, : len(token_ids_in_memory)
-                    ]
+                              req_pool_idx, : len(token_ids_in_memory)
+                              ]
                     prefix_len = self.tree_cache.insert(
                         token_ids_in_memory, indices.clone()
                     )
@@ -487,9 +487,13 @@ class Batch:
             "repetition_penalties",
             "logit_bias",
         ]:
-            setattr(
-                self, item, torch.concat([getattr(self, item), getattr(other, item)])
-            )
+            self_val = getattr(self, item, None)
+            other_val = getattr(other, item, None)
+            # logit_bias can be None
+            if self_val is not None and other_val is not None:
+                setattr(
+                    self, item, torch.concat([self_val, other_val])
+                )
 
     def sample(self, logits: torch.Tensor):
         # Post process logits
@@ -498,7 +502,19 @@ class Batch:
         # Referring to the transformers execution order, repetition_penalty should come before temperatures.
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
         if self.output_tokens is not None:
-            apply_repetition_penalty(self.repetition_penalties, self.output_tokens, logits)
+            equal_1 = self.repetition_penalties == 1.0
+            # If the values of repetition_penalties are all 1, apply_repetition_penalty() is skipped.
+            if not equal_1.all().item():
+                if equal_1.any().item():
+                    # If any of the repetition_penalties values is 1, only apply_repetition_penalty()
+                    # that is not 1 is executed.
+                    for i, r in enumerate(self.repetition_penalties):
+                        if not (r == 1.0).item():
+                            apply_repetition_penalty(r, self.output_tokens[i], logits[i], dim=0)
+                else:
+                    # If none of the values of repetition_penalties is 1, the entire tensor is passed to
+                    # apply_repetition_penalty() for calculation, which will be faster.
+                    apply_repetition_penalty(self.repetition_penalties, self.output_tokens, logits)
 
         logits.div_(self.temperatures)
 
@@ -544,6 +560,6 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sort[(probs_sum - probs_sort) > top_ps] = 0.0
     probs_sort[
         torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1) >= top_ks
-    ] = 0.0
+        ] = 0.0
     probs_sort.div_(probs_sort.max(dim=-1, keepdim=True)[0])
     return probs_sort, probs_idx
