@@ -15,5 +15,5 @@ def update_version_in_pyproject(file_path: str):
 
     print(f"Version updated to {new_version}")
 
-file_path = "/root/sglang/python/pyproject.toml"
+file_path = "pyproject.toml"
 update_version_in_pyproject(file_path)
