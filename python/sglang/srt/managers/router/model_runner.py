@@ -5,6 +5,7 @@ import logging
 import pkgutil
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import List
 import numpy as np
 import torch
 import triton
@@ -80,6 +81,7 @@ class InputMetadata:
     out_cache_cont_end: torch.Tensor = None
 
     other_kv_index: torch.Tensor = None
+    top_logprobs_nums: List[int] = None
     return_logprob: bool = False
 
     # for flashinfer
@@ -180,6 +182,7 @@ class InputMetadata:
         out_cache_loc,
         out_cache_cont_start=None,
         out_cache_cont_end=None,
+        top_logprobs_nums=None,
         return_logprob=False,
     ):
         batch_size = len(req_pool_indices)
@@ -228,6 +231,7 @@ class InputMetadata:
             out_cache_loc=out_cache_loc,
             out_cache_cont_start=out_cache_cont_start,
             out_cache_cont_end=out_cache_cont_end,
+            top_logprobs_nums=top_logprobs_nums,
             return_logprob=return_logprob,
             other_kv_index=other_kv_index,
         )
@@ -399,6 +403,7 @@ class ModelRunner:
             prefix_lens=batch.prefix_lens,
             position_ids_offsets=batch.position_ids_offsets,
             out_cache_loc=batch.out_cache_loc,
+            top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
         )
         return self.model.forward(
@@ -416,6 +421,7 @@ class ModelRunner:
             prefix_lens=batch.prefix_lens,
             position_ids_offsets=batch.position_ids_offsets,
             out_cache_loc=batch.out_cache_loc,
+            top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
         )
         return self.model.forward(
@@ -435,6 +441,7 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             out_cache_cont_start=batch.out_cache_cont_start,
             out_cache_cont_end=batch.out_cache_cont_end,
+            top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
         )
         return self.model.forward(
@@ -452,6 +459,7 @@ class ModelRunner:
             prefix_lens=batch.prefix_lens,
             position_ids_offsets=batch.position_ids_offsets,
             out_cache_loc=batch.out_cache_loc,
+            top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
         )
         return self.model.forward(

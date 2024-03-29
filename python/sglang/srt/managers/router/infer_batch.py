@@ -56,6 +56,7 @@ class Req:
         self.sampling_params = None
         self.return_logprob = False
         self.logprob_start_len = 0
+        self.top_logprobs_num = 0
         self.stream = False
 
         self.tokenizer = None
@@ -67,9 +68,11 @@ class Req:
         self.prefix_indices = []
         self.last_node = None
 
-        self.logprob = None
-        self.token_logprob = None
-        self.normalized_logprob = None
+        self.prefill_token_logprobs = None
+        self.decode_token_logprobs = None
+        self.normalized_prompt_logprob = None
+        self.prefill_top_logprobs = None
+        self.decode_top_logprobs = None
 
         # For constrained decoding
         self.regex_fsm = None
@@ -172,6 +175,9 @@ class Batch:
     out_cache_loc: torch.Tensor = None
     out_cache_cont_start: torch.Tensor = None
     out_cache_cont_end: torch.Tensor = None
+
+    # for processing logprobs
+    top_logprobs_nums: List[int] = None
     return_logprob: bool = False
 
     # for multimodal
@@ -285,6 +291,7 @@ class Batch:
         self.position_ids_offsets = position_ids_offsets
         self.extend_num_tokens = extend_num_tokens
         self.out_cache_loc = out_cache_loc
+        self.top_logprobs_nums = [r.top_logprobs_num for r in reqs]
 
         self.temperatures = torch.tensor(
             [r.sampling_params.temperature for r in reqs],
@@ -439,6 +446,7 @@ class Batch:
         self.prefix_lens = None
         self.position_ids_offsets = self.position_ids_offsets[new_indices]
         self.out_cache_loc = self.out_cache_cont_start = self.out_cache_cont_end = None
+        self.top_logprobs_nums = [self.top_logprobs_nums[i] for i in unfinished_indices]
         self.return_logprob = any(req.return_logprob for req in self.reqs)
 
         for item in [
@@ -467,6 +475,7 @@ class Batch:
             [self.position_ids_offsets, other.position_ids_offsets]
         )
         self.out_cache_loc = self.out_cache_cont_start = self.out_cache_cont_end = None
+        self.top_logprobs_nums.extend(other.top_logprobs_nums)
         self.return_logprob = any(req.return_logprob for req in self.reqs)
 
         for item in [
