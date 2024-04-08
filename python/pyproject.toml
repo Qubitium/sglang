@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sglang"
-version = "999.1.13+dev20240408075248"
+version = "999.1.13+dev20240408075621"
 description = "A structured generation langauge for LLMs."
 readme = "README.md"
 requires-python = ">=3.8"
