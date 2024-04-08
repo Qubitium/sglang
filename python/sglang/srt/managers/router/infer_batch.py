@@ -516,7 +516,8 @@ class Batch:
 
         # Referring to the transformers execution order, repetition_penalty should come before temperatures.
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
-        if self.output_tokens is not None and len(self.output_tokens) > 0 and len(self.output_tokens) == len(self.repetition_penalties):
+        assert len(self.output_tokens) == len(self.repetition_penalties)
+        if self.output_tokens is not None and len(self.output_tokens) > 0:
             for i, r in enumerate(self.repetition_penalties):
                 # If any of the repetition_penalties values is 1, only apply_repetition_penalty() that is not 1 is executed.
                 if not (r == 1.0).item():
