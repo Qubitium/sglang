@@ -24,6 +24,7 @@ class FinishReason(Enum):
 # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py#L338
 def apply_repetition_penalty(penalty, input_ids: torch.Tensor,
                              scores: torch.Tensor, dim=1) -> torch.Tensor:
+    input_ids = torch.tensor(input_ids, device=scores.device)
     score = torch.gather(scores, dim, input_ids)
 
     # if score < 0 then repetition penalty has to be multiplied to reduce the token probabilities
@@ -199,7 +200,7 @@ class Batch:
     logit_bias: torch.Tensor = None
 
     # for repetition_penalty
-    output_tokens: torch.LongTensor = None
+    output_tokens = None
 
     @classmethod
     def init_new(cls, reqs, req_to_token_pool, token_to_kv_pool, tree_cache):
@@ -501,11 +502,13 @@ class Batch:
 
         # Referring to the transformers execution order, repetition_penalty should come before temperatures.
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
-        if self.output_tokens is not None:
+        if self.output_tokens is not None and len(self.output_tokens) > 0:
             equal_1 = self.repetition_penalties == 1.0
             # If the values of repetition_penalties are all 1, apply_repetition_penalty() is skipped.
             if not equal_1.all().item():
-                if equal_1.any().item():
+                # The ids sizes of output_tokens are inconsistent and you need to call apply_repetition_penalty() separately.
+                output_tokens_size_inconsistent = any(len(self.output_tokens[0]) != len(l) for l in self.output_tokens[1:])
+                if equal_1.any().item() or output_tokens_size_inconsistent:
                     # If any of the repetition_penalties values is 1, only apply_repetition_penalty()
                     # that is not 1 is executed.
                     for i, r in enumerate(self.repetition_penalties):

@@ -456,9 +456,7 @@ class ModelServer():
 
     def forward_decode_batch(self, batch: Batch):
         output_ids = [r.output_ids[:] for r in batch.reqs]
-        batch.output_tokens = torch.tensor(
-            output_ids, dtype=torch.long, device="cuda"
-        )
+        batch.output_tokens = output_ids
 
         # check if decode out of memory
         if not batch.check_decode_mem():
