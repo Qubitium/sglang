@@ -516,22 +516,11 @@ class Batch:
 
         # Referring to the transformers execution order, repetition_penalty should come before temperatures.
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
-        if self.output_tokens is not None and len(self.output_tokens) > 0:
-            equal_1 = self.repetition_penalties == 1.0
-            # If the values of repetition_penalties are all 1, apply_repetition_penalty() is skipped.
-            if not equal_1.all().item():
-                # The ids sizes of output_tokens are inconsistent and you need to call apply_repetition_penalty() separately.
-                output_tokens_size_inconsistent = any(len(self.output_tokens[0]) != len(l) for l in self.output_tokens[1:])
-                if equal_1.any().item() or output_tokens_size_inconsistent:
-                    # If any of the repetition_penalties values is 1, only apply_repetition_penalty()
-                    # that is not 1 is executed.
-                    for i, r in enumerate(self.repetition_penalties):
-                        if not (r == 1.0).item():
-                            apply_repetition_penalty(r, self.output_tokens[i], logits[i], dim=0)
-                else:
-                    # If none of the values of repetition_penalties is 1, the entire tensor is passed to
-                    # apply_repetition_penalty() for calculation, which will be faster.
-                    apply_repetition_penalty(self.repetition_penalties, self.output_tokens, logits)
+        if self.output_tokens is not None and len(self.output_tokens) > 0 and len(self.output_tokens) == len(self.repetition_penalties):
+            for i, r in enumerate(self.repetition_penalties):
+                # If any of the repetition_penalties values is 1, only apply_repetition_penalty() that is not 1 is executed.
+                if not (r == 1.0).item():
+                    apply_repetition_penalty(r, self.output_tokens[i], logits[i], dim=0)
 
         logits.div_(self.temperatures)
 
