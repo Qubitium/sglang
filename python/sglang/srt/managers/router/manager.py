@@ -1,7 +1,9 @@
 import logging
 import multiprocessing as mp
+import os
 import queue
 
+import psutil
 from sglang.srt.managers.router.model import ModelClient
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
@@ -89,4 +91,18 @@ def start_router_process(
     startup_chan.put_nowait("init ok")
 
     # blocking
-    router.loop_for_forward()
+    try:
+        router.loop_for_forward()
+    except KeyboardInterrupt:
+        print("Caught KeyboardInterrupt, terminating sglang process")
+        try:
+            cur_process = psutil.Process(os.getpid())
+            parent = cur_process.parent()
+        except psutil.NoSuchProcess:
+            return
+        children = cur_process.children(recursive=True)
+        for child in children:
+            child.kill()
+        psutil.wait_procs(children, timeout=5)
+        parent.kill()
+        parent.wait(timeout=5)
