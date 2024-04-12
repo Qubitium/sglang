@@ -1,8 +1,15 @@
-
+import asyncio
 import logging
+import multiprocessing
+import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
+
+import rpyc
 import torch
+from rpyc import ThreadedServer
+from rpyc.utils.classic import obtain
 from sglang.srt.constrained.fsm_cache import FSMCache
 from sglang.srt.constrained.jump_forward import JumpForwardCache
 from sglang.srt.hf_transformers_utils import get_processor, get_tokenizer
@@ -29,12 +36,13 @@ logger = logging.getLogger("model_rpc")
 
 
 class ModelServer():
-    def exposed_init_model(
-        self,
-        tp_rank: int,
-        server_args: ServerArgs,
-        port_args: PortArgs,
+    def __init__(
+            self,
+            tp_rank: int,
+            server_args: ServerArgs,
+            port_args: PortArgs,
     ):
+        server_args, port_args = [obtain(x) for x in [server_args, port_args]]
 
         # Copy arguments
         self.tp_rank = tp_rank
@@ -157,6 +165,9 @@ class ModelServer():
             )
 
     def exposed_step(self, recv_reqs):
+        if self.tp_size != 1:
+            recv_reqs = obtain(recv_reqs)
+
         try:
             # Recv requests
             for recv_req in recv_reqs:
@@ -624,47 +635,84 @@ class ModelServer():
                 batch.reqs = []
 
 
+class ModelRpcService(rpyc.Service):
+    exposed_ModelRpcServer = ModelServer
+
+
 class ModelClient:
     def __init__(self, server_args: ServerArgs, port_args: PortArgs):
         tp_size = server_args.tp_size
 
         if tp_size == 1:
             # Init model
-            self.model_server = ModelServer()
-            self.model_server.exposed_init_model(0, server_args, port_args)
-            # Wrap functions
-            # def async_wrap(f):
-            #     async def _func(*args, **kwargs):
-            #         return f(*args, **kwargs)
-            #
-            #     return _func
-
-            # self.step = async_wrap(self.model_server.exposed_step)
-            self.step = self.model_server.exposed_step
-        # else:
-        #     with ThreadPoolExecutor(tp_size) as executor:
-        #         # Launch model processes
-        #         rets = executor.map(start_model_process, port_args.model_rpc_ports)
-        #         self.model_servers = [x[0] for x in rets]
-        #         self.procs = [x[1] for x in rets]
-        #
-        #         # Init model
-        #         def init_model(i):
-        #             return self.model_servers[i].init_model(i, server_args, port_args)
-        #
-        #         rets = [obtain(x) for x in executor.map(init_model, range(tp_size))]
+            self.model_server = ModelRpcService().exposed_ModelRpcServer(
+                0, server_args, port_args
+            )
 
             # Wrap functions
-            # def async_wrap(func_name):
-            #     fs = [rpyc.async_(getattr(m, func_name)) for m in self.model_servers]
-            #
-            #     async def _func(*args, **kwargs):
-            #         tasks = [f(*args, **kwargs) for f in fs]
-            #         await asyncio.gather(*[asyncio.to_thread(t.wait) for t in tasks])
-            #         return obtain(tasks[0].value)
-            #
-            #     return _func
+            def async_wrap(f):
+                async def _func(*args, **kwargs):
+                    return f(*args, **kwargs)
 
-            # self.step = async_wrap("step")
+                return _func
+
+            self.step = async_wrap(self.model_server.exposed_step)
+        else:
+            with ThreadPoolExecutor(tp_size) as executor:
+                # Launch model processes
+                rets = executor.map(start_model_process, port_args.model_rpc_ports)
+                self.remote_services = [x[0] for x in rets]
+                self.procs = [x[1] for x in rets]
+
+                # Init model
+                def init_model(i):
+                    return self.remote_services[i].ModelRpcServer(
+                        i, server_args, port_args
+                    )
+
+                self.model_servers = executor.map(init_model, range(tp_size))
+
+            # Wrap functions
+            def async_wrap(func_name):
+                fs = [rpyc.async_(getattr(m, func_name)) for m in self.model_servers]
+
+                async def _func(*args, **kwargs):
+                    tasks = [f(*args, **kwargs) for f in fs]
+                    await asyncio.gather(*[asyncio.to_thread(t.wait) for t in tasks])
+                    return obtain(tasks[0].value)
+
+                return _func
+            self.step = async_wrap("step")
 
 
+def _init_service(port):
+    t = ThreadedServer(
+        ModelRpcService(),
+        port=port,
+        protocol_config={"allow_pickle": True, "sync_request_timeout": 1800},
+    )
+    t.start()
+
+
+def start_model_process(port):
+    proc = multiprocessing.Process(target=_init_service, args=(port,))
+    proc.start()
+    time.sleep(1)
+
+    repeat_count = 0
+    while repeat_count < 20:
+        try:
+            con = rpyc.connect(
+                "localhost",
+                port,
+                config={"allow_pickle": True, "sync_request_timeout": 1800},
+            )
+            break
+        except ConnectionRefusedError:
+            time.sleep(1)
+        repeat_count += 1
+    if repeat_count == 20:
+        raise RuntimeError("init rpc env error!")
+
+    assert proc.is_alive()
+    return con.root, proc

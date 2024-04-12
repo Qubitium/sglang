@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import multiprocessing as mp
 import os
@@ -23,7 +24,7 @@ class RouterManager:
         self.detokenizer_chan = detokenzier_chan
         self.idle_chan = idle_chan
 
-    def loop_for_forward(self):
+    async def loop_for_forward(self):
         idle = True
         while True:
             if not idle:
@@ -61,8 +62,7 @@ class RouterManager:
             if len(next_step_input) > 0:
                 print(f"Forward Requests batch size: {len(next_step_input)}")
 
-            output = self.model_client.step(next_step_input)
-            # print(f"model_client.step done: {out_pyobjs}")
+            output = await self.model_client.step(next_step_input)
 
             for item in output:
                 self.detokenizer_chan.put_nowait(item)
@@ -92,7 +92,9 @@ def start_router_process(
 
     # blocking
     try:
-        router.loop_for_forward()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(router.loop_for_forward())
     except KeyboardInterrupt:
         print("Caught KeyboardInterrupt, terminating sglang process")
         try:
