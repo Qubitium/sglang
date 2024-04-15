@@ -498,7 +498,7 @@ async def v1_chat_completions(raw_request: Request):
     return response
 
 
-def launch_server(server_args, pipe_finish_writer=None):
+def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
     print("launch_server started.... ")
     global tokenizer_manager
     global chat_template_name
@@ -561,6 +561,8 @@ def launch_server(server_args, pipe_finish_writer=None):
 
     # Launch processes
     tokenizer_manager = TokenizerManager(server_args, router_chan, detokenizer_chan, idle_chan)
+
+    tokenizer_init_chan.put_nowait("init ok")
 
     proc_router = mp.Process(
         target=start_router_process,
@@ -658,6 +660,7 @@ class Runtime:
     def __init__(
             self,
             model_path: str,
+            tokenizer_init_chan: mp.Queue,
             tokenizer_path: Optional[str] = None,
             load_format: str = "auto",
             tokenizer_mode: str = "auto",
@@ -718,7 +721,7 @@ class Runtime:
         # self.pid = proc.pid
         self.pid = os.getpid()
 
-        threading.Thread(target=launch_server, args=[self.server_args, None], daemon=True).start()
+        threading.Thread(target=launch_server, args=[self.server_args, tokenizer_init_chan, None], daemon=True).start()
 
         # try:
         #     init_state = pipe_reader.recv()
@@ -746,12 +749,12 @@ class Runtime:
             # parent.wait(timeout=5)
             self.pid = None
 
-    def get_tokenizer(self):
-        return get_tokenizer(
-            self.server_args.tokenizer_path,
-            tokenizer_mode=self.server_args.tokenizer_mode,
-            trust_remote_code=self.server_args.trust_remote_code,
-        )
+    # def get_tokenizer(self):
+    #     return get_tokenizer(
+    #         self.server_args.tokenizer_path,
+    #         tokenizer_mode=self.server_args.tokenizer_mode,
+    #         trust_remote_code=self.server_args.trust_remote_code,
+    #     )
 
     async def add_request(
             self,
