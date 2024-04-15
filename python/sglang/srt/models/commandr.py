@@ -28,7 +28,6 @@ from torch import nn
 from torch.nn.parameter import Parameter
 from transformers import CohereConfig
 
-from vllm.attention import Attention, AttentionMetadata
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -36,16 +35,16 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
-from vllm.sequence import SamplerOutput
+
+from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.managers.router.model_runner import InputMetadata
 
 
 @torch.compile
@@ -124,6 +123,7 @@ class CohereAttention(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
+        layer_id: int = 0,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -175,11 +175,12 @@ class CohereAttention(nn.Module):
             rope_scaling=self.rope_scaling,
             is_neox_style=False,
         )
-        self.attn = Attention(
+        self.attn = RadixAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            layer_id=layer_id,
         )
         if self.use_qk_norm:
             self.q_norm = LayerNorm(param_shape=(self.num_heads,
@@ -202,15 +203,14 @@ class CohereAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        input_metadata: InputMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.use_qk_norm:
             q, k = self._apply_qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v, input_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -219,11 +219,12 @@ class CohereDecoderLayer(nn.Module):
 
     def __init__(self,
                  config: CohereConfig,
+                 layer_id: int = 0,
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = CohereAttention(config, linear_method=linear_method)
+        self.self_attn = CohereAttention(config, layer_id=layer_id, linear_method=linear_method)
 
         self.mlp = CohereMLP(config, linear_method=linear_method)
         self.input_layernorm = LayerNorm(param_shape=(config.hidden_size),
@@ -233,8 +234,7 @@ class CohereDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        input_metadata: InputMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -243,8 +243,7 @@ class CohereDecoderLayer(nn.Module):
         hidden_states_attention = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
+            input_metadata=input_metadata,
         )
         hidden_states_mlp = self.mlp(hidden_states)
         # Add everything together
@@ -266,8 +265,8 @@ class CohereModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.layers = nn.ModuleList([
-            CohereDecoderLayer(config, linear_method=linear_method)
-            for _ in range(config.num_hidden_layers)
+            CohereDecoderLayer(config, i, linear_method=linear_method)
+            for i in range(config.num_hidden_layers)
         ])
         self.norm = LayerNorm(param_shape=(config.hidden_size),
                               eps=config.layer_norm_eps)
@@ -276,8 +275,7 @@ class CohereModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -286,8 +284,7 @@ class CohereModel(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i],
-                attn_metadata,
+                input_metadata,
                 residual,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -304,36 +301,20 @@ class CohereForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.logits_processor = LogitsProcessor(config.vocab_size,
-                                                scale=config.logit_scale)
+        self.logits_processor = LogitsProcessor(config)
         self.model = CohereModel(config, linear_method)
-        self.sampler = Sampler()
 
     @torch.no_grad()
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
-        return hidden_states
-
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.model.embed_tokens.weight,
-                                       hidden_states, sampling_metadata)
-        return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+        hidden_states = self.model(input_ids, positions, input_metadata,)
+        return self.logits_processor(
+            input_ids, hidden_states, self.model.embed_tokens.weight, input_metadata
+        )
 
     def load_weights(
         self,
@@ -354,6 +335,7 @@ class CohereForCausalLM(nn.Module):
         loaded_params = set()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
+            print("weight name",name)
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
