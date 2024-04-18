@@ -22,7 +22,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.weight_utils import (
+from sglang.srt.weight_utils import (
     default_weight_loader,
     hf_model_weights_iterator,
 )

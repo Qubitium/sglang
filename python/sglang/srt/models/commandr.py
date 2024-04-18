@@ -39,7 +39,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.weight_utils import (default_weight_loader,
+from sglang.srt.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 
 from sglang.srt.layers.logits_processor import LogitsProcessor
