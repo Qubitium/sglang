@@ -95,10 +95,10 @@ class Req:
         if first_token.startswith("▁"):
             old_output_str = " " + old_output_str
         new_input_string = (
-                self.input_text
-                + self.output_and_jump_forward_str
-                + old_output_str
-                + jump_forward_str
+            self.input_text
+            + self.output_and_jump_forward_str
+            + old_output_str
+            + jump_forward_str
         )
         new_input_ids = self.tokenizer.encode(new_input_string)
         if self.pixel_values is not None:
@@ -106,7 +106,7 @@ class Req:
             jump_forward_tokens_len = len(self.tokenizer.encode(jump_forward_str))
         else:
             jump_forward_tokens_len = (
-                    len(new_input_ids) - len(self.input_ids) - len(self.output_ids)
+                len(new_input_ids) - len(self.input_ids) - len(self.output_ids)
             )
 
         # print("=" * 100)
@@ -121,7 +121,7 @@ class Req:
         )
         self.regex_fsm_state = next_state
         self.output_and_jump_forward_str = (
-                self.output_and_jump_forward_str + old_output_str + jump_forward_str
+            self.output_and_jump_forward_str + old_output_str + jump_forward_str
         )
 
         # print(f"Output and jump forward str:\n{self.output_and_jump_forward_str}")
@@ -137,8 +137,8 @@ class Req:
             return
 
         if (
-                self.output_ids[-1] == self.tokenizer.eos_token_id
-                and self.sampling_params.ignore_eos == False
+            self.output_ids[-1] == self.tokenizer.eos_token_id
+            and self.sampling_params.ignore_eos == False
         ):
             self.finished = True
             self.finish_reason = FinishReason.EOS_TOKEN
@@ -146,7 +146,7 @@ class Req:
 
         if len(self.sampling_params.stop_strs) > 0:
             tail_str = self.tokenizer.decode(
-                self.output_ids[-(self.sampling_params.stop_str_max_len + 1):]
+                self.output_ids[-(self.sampling_params.stop_str_max_len + 1) :]
             )
 
             for stop_str in self.sampling_params.stop_strs:
@@ -217,11 +217,11 @@ class Batch:
     def is_empty(self):
         return len(self.reqs) == 0
 
-    def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor, logits_dtype: torch.dtype):
+    def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor):
         device = "cuda"
         bs = len(self.reqs)
         reqs = self.reqs
-        input_ids = [r.input_ids[len(r.prefix_indices):] for r in reqs]
+        input_ids = [r.input_ids[len(r.prefix_indices) :] for r in reqs]
         prefix_indices = [r.prefix_indices for r in reqs]
 
         # Handle prefix
@@ -241,7 +241,7 @@ class Batch:
             else:
                 prefix_lens.append(len(prefix_indices[i]))
                 self.req_to_token_pool.req_to_token[req_pool_indices_cpu[i]][
-                : len(prefix_indices[i])
+                    : len(prefix_indices[i])
                 ] = prefix_indices[i]
 
             seq_lens.append(prefix_lens[-1] + extend_lens[-1])
@@ -265,8 +265,8 @@ class Batch:
         pt = 0
         for i in range(bs):
             self.req_to_token_pool.req_to_token[req_pool_indices_cpu[i]][
-            prefix_lens[i]: prefix_lens[i] + extend_lens[i]
-            ] = out_cache_loc[pt: pt + extend_lens[i]]
+                prefix_lens[i] : prefix_lens[i] + extend_lens[i]
+            ] = out_cache_loc[pt : pt + extend_lens[i]]
             pt += extend_lens[i]
 
         # Handle logit bias but only allocate when needed
@@ -361,8 +361,8 @@ class Batch:
             # TODO: apply more fine-grained retraction
 
             token_indices = self.req_to_token_pool.req_to_token[
-                                req_pool_indices_np[idx]
-                            ][: seq_lens_np[idx]]
+                req_pool_indices_np[idx]
+            ][: seq_lens_np[idx]]
             self.token_to_kv_pool.free(token_indices)
 
         self.filter_batch(sorted_indices)
@@ -389,8 +389,8 @@ class Batch:
                         req_pool_indices_cpu = self.req_pool_indices.cpu().tolist()
                     req_pool_idx = req_pool_indices_cpu[i]
                     indices = self.req_to_token_pool.req_to_token[
-                              req_pool_idx, : len(token_ids_in_memory)
-                              ]
+                        req_pool_idx, : len(token_ids_in_memory)
+                    ]
                     prefix_len = self.tree_cache.insert(
                         token_ids_in_memory, indices.clone()
                     )
@@ -567,6 +567,6 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sort[(probs_sum - probs_sort) > top_ps] = 0.0
     probs_sort[
         torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1) >= top_ks
-        ] = 0.0
+    ] = 0.0
     probs_sort.div_(probs_sort.max(dim=-1, keepdim=True)[0])
     return probs_sort, probs_idx

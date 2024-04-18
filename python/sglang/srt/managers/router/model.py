@@ -513,9 +513,13 @@ class ModelServer():
         batch.prepare_for_decode()
 
         # Forward
-        logits, (_, _, decode_top_logprobs, _, last_logprobs) = (
-            self.model_runner.forward(batch, ForwardMode.DECODE)
-        )
+        logits, (
+            _,
+            _,
+            decode_top_logprobs,
+            _,
+            last_logprobs,
+        ) = self.model_runner.forward(batch, ForwardMode.DECODE)
         next_token_ids, _ = batch.sample(logits)
         next_token_ids = next_token_ids.cpu().tolist()
 

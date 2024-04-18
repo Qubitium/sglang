@@ -51,7 +51,7 @@ from sglang.srt.managers.openai_protocol import (
 from sglang.srt.managers.router.manager import start_router_process
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils import handle_port_init
+from sglang.srt.utils import enable_show_time_cost, handle_port_init
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
@@ -502,6 +502,10 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
     print("launch_server started.... ")
     global tokenizer_manager
     global chat_template_name
+
+    # start show time thread
+    if server_args.show_time_cost:
+        enable_show_time_cost()
 
     # disable disk cache if needed
     if server_args.disable_disk_cache:
