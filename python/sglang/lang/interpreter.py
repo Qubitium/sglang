@@ -255,11 +255,18 @@ class StreamExecutor:
         ret = self.meta_info.get(name, None)
         return ret
 
-    def fork(self, number: int, position_ids_offset: Optional[List[int]] = None):
-        self.submit(SglCommitLazy())
-        self.sync()
+    def fork(
+        self,
+        size: int = 1,
+        position_ids_offset: Optional[List[int]] = None,
+        copy: bool = False,
+    ):
+        size = int(size)
+        assert(size >= 1)
 
-        number = int(number)
+        if size > 1 or copy:
+            self.submit(SglCommitLazy())
+            self.sync()
 
         exes = [
             StreamExecutor(
@@ -269,9 +276,9 @@ class StreamExecutor:
                 self.chat_template,
                 self.stream,
             )
-            for _ in range(number)
+            for _ in range(size)
         ]
-        for i in range(number):
+        for i in range(size):
             exes[i].variables = dict(self.variables)
             exes[i].text_ = str(self.text_)
             exes[i].messages_ = list(self.messages_)
@@ -641,15 +648,20 @@ class ProgramState:
         yield
         self.stream_executor.submit(SglVarScopeEnd(name))
 
-    def fork(self, number: int = 1, position_ids_offset: Optional[List[int]] = None):
-        stream_executors = self.stream_executor.fork(number, position_ids_offset)
+    def fork(
+        self,
+        size: int = 1,
+        position_ids_offset: Optional[List[int]] = None,
+        copy: bool = False,
+    ):
+        stream_executors = self.stream_executor.fork(size, position_ids_offset, copy)
         states = [ProgramState(x) for x in stream_executors]
         state_group = ProgramStateGroup(states, self)
         return state_group
 
     @contextmanager
     def copy(self, position_ids_offset: Optional[List[int]] = None):
-        state_group = self.fork(1, position_ids_offset)
+        state_group = self.fork(1, position_ids_offset, True)
         try:
             yield state_group[0]
         finally:
