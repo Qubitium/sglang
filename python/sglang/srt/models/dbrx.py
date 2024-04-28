@@ -193,13 +193,11 @@ class DbrxAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            linear_method=linear_method,
         )
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
             bias=False,
-            linear_method=linear_method,
         )
         self.rotary_emb = get_rope(
             self.head_dim,

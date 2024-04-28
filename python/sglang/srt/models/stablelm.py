@@ -43,7 +43,6 @@ class StablelmMLP(nn.Module):
             config.hidden_size,
             [config.intermediate_size] * 2,
             bias=False,
-            linear_method=linear_method,
         )
         self.down_proj = RowParallelLinear(
             config.intermediate_size, config.hidden_size, bias=False
@@ -104,13 +103,11 @@ class StablelmAttention(nn.Module):
             self.total_num_heads,
             self.total_num_key_value_heads,
             self.qkv_bias,
-            linear_method=linear_method,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=False,
-            linear_method=linear_method,
         )
         self.rotary_emb = get_rope(
             self.head_dim,

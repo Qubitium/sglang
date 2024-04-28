@@ -42,14 +42,12 @@ class QWenMLP(nn.Module):
             2 * [intermediate_size],
             bias=False,
             gather_output=False,
-            linear_method=linear_method,
         )
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            linear_method=linear_method,
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -90,14 +88,12 @@ class QWenAttention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             bias=True,
-            linear_method=linear_method,
         )
         self.c_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            linear_method=linear_method,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
