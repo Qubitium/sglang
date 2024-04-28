@@ -101,13 +101,11 @@ class CohereMLP(nn.Module):
             self.hidden_size,
             [self.intermediate_size] * 2,
             bias=False,
-            # linear_method=linear_method,
         )
         self.down_proj = RowParallelLinear(
             self.intermediate_size,
             self.hidden_size,
             bias=False,
-            # linear_method=linear_method,
         )
         self.act_fn = SiluAndMul()
 
@@ -158,13 +156,11 @@ class CohereAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            # linear_method=linear_method,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=False,
-            # linear_method=linear_method,
         )
         self.rotary_emb = get_rope(
             self.head_dim,

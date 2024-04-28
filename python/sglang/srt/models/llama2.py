@@ -44,10 +44,9 @@ class LlamaMLP(nn.Module):
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
-            linear_method=linear_method,
         )
         self.down_proj = RowParallelLinear(
-            intermediate_size, hidden_size, bias=False, linear_method=linear_method
+            intermediate_size, hidden_size, bias=False
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -104,13 +103,11 @@ class LlamaAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            linear_method=linear_method,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
-            linear_method=linear_method,
         )
 
         self.rotary_emb = get_rope(
