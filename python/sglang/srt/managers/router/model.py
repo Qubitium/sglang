@@ -8,8 +8,10 @@ from typing import List
 
 import rpyc
 import torch
-from rpyc import ThreadedServer
 from rpyc.utils.classic import obtain
+from rpyc.utils.server import ThreadedServer
+from vllm.logger import _default_handler as vllm_default_handler
+
 from sglang.srt.constrained.fsm_cache import FSMCache
 from sglang.srt.constrained.jump_forward import JumpForwardCache
 from sglang.srt.hf_transformers_utils import get_processor, get_tokenizer
@@ -30,7 +32,6 @@ from sglang.srt.utils import (
     is_multimodal_model,
     set_random_seed,
 )
-from vllm.logger import _default_handler as vllm_default_handler
 
 logger = logging.getLogger("model_rpc")
 
@@ -112,7 +113,7 @@ class ModelServer():
         logger.info(server_args.get_optional_modes_logging())
 
         # Init cache
-        self.tree_cache = RadixCache(server_args.disable_radix_cache)
+        self.tree_cache = RadixCache(disable=server_args.disable_radix_cache)
         self.tree_cache_metrics = {"total": 0, "hit": 0}
         self.scheduler = Scheduler(
             self.schedule_heuristic,
@@ -347,6 +348,7 @@ class ModelServer():
                     # Undo the insertion
                     delta = self.tree_cache.dec_ref_counter(req.last_node)
                     available_size += delta
+                    break
                 else:
                     # Add this request to the running batch
                     self.token_to_kv_pool.add_refs(req.prefix_indices)
@@ -355,7 +357,8 @@ class ModelServer():
                         req.extend_input_len + req.max_new_tokens()
                     )
                     new_batch_input_tokens += req.extend_input_len
-
+            else:
+                break
         if len(can_run_list) == 0:
             return None
 
@@ -549,6 +552,7 @@ class ModelServer():
         output_and_jump_forward_strs = []
         output_hit_stop_str = []
         output_skip_special_tokens = []
+        output_spaces_between_special_tokens = []
         output_meta_info = []
         output_finished = []
         finished_indices = []
@@ -575,13 +579,18 @@ class ModelServer():
                 output_skip_special_tokens.append(
                     req.sampling_params.skip_special_tokens
                 )
+                output_spaces_between_special_tokens.append(
+                    req.sampling_params.spaces_between_special_tokens
+                )
 
                 meta_info = {
                     "prompt_tokens": req.prompt_tokens,
                     "prompt_tokens_ids": req.input_ids,
-                    "completion_tokens": len(req.output_ids),
-                    "completion_tokens_wo_jump_forward": req.completion_tokens_wo_jump_forward,
+                    "completion_tokens": len(req.input_ids)
+                    + len(req.output_ids)
+                    - req.prompt_tokens,
                     "completion_tokens_ids": req.output_ids,
+                    "completion_tokens_wo_jump_forward": req.completion_tokens_wo_jump_forward,
                 }
                 if req.return_logprob:
                     (
@@ -609,6 +618,7 @@ class ModelServer():
                     output_and_jump_forward_strs,
                     output_hit_stop_str,
                     output_skip_special_tokens,
+                    output_spaces_between_special_tokens,
                     output_meta_info,
                     output_finished,
                 )
@@ -628,7 +638,7 @@ class ModelServer():
                     token_ids[:seq_len], indices.clone()
                 )
 
-                self.token_to_kv_pool.free(indices[:prefix_len])
+                self.token_to_kv_pool.dec_refs(indices[:prefix_len])
                 self.req_to_token_pool.free(req_pool_idx)
                 self.tree_cache.dec_ref_counter(req.last_node)
 
@@ -686,6 +696,7 @@ class ModelClient:
                     return obtain(tasks[0].value)
 
                 return _func
+
             self.step = async_wrap("step")
 
 

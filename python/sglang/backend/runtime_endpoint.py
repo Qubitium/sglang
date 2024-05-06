@@ -1,13 +1,14 @@
 import json
-from typing import List, Optional
+from typing import Callable, List, Optional, Union
 
 import numpy as np
+import requests
 from sglang.backend.base_backend import BaseBackend
 from sglang.global_config import global_config
 from sglang.lang.chat_template import get_chat_template_by_model_path
 from sglang.lang.interpreter import StreamExecutor
-from sglang.lang.ir import SglSamplingParams
-from sglang.utils import find_printable_text, http_request
+from sglang.lang.ir import SglArgument, SglSamplingParams
+from sglang.utils import encode_image_base64, find_printable_text, http_request
 
 
 class RuntimeEndpoint(BaseBackend):
@@ -105,6 +106,7 @@ class RuntimeEndpoint(BaseBackend):
                 "text": s.text_,
                 "sampling_params": {
                     "skip_special_tokens": global_config.skip_special_tokens_in_output,
+                    "spaces_between_special_tokens": global_config.spaces_between_special_tokens_in_out,
                     **sampling_params.to_srt_kwargs(),
                 },
             }
@@ -113,6 +115,7 @@ class RuntimeEndpoint(BaseBackend):
                 "text": s.text_,
                 "sampling_params": {
                     "skip_special_tokens": global_config.skip_special_tokens_in_output,
+                    "spaces_between_special_tokens": global_config.spaces_between_special_tokens_in_out,
                     "dtype": "int",
                     **sampling_params.to_srt_kwargs(),
                 },
@@ -143,6 +146,7 @@ class RuntimeEndpoint(BaseBackend):
                 "text": s.text_,
                 "sampling_params": {
                     "skip_special_tokens": global_config.skip_special_tokens_in_output,
+                    "spaces_between_special_tokens": global_config.spaces_between_special_tokens_in_out,
                     **sampling_params.to_srt_kwargs(),
                 },
             }
@@ -151,6 +155,7 @@ class RuntimeEndpoint(BaseBackend):
                 "text": s.text_,
                 "sampling_params": {
                     "skip_special_tokens": global_config.skip_special_tokens_in_output,
+                    "spaces_between_special_tokens": global_config.spaces_between_special_tokens_in_out,
                     "dtype": "int",
                     **sampling_params.to_srt_kwargs(),
                 },

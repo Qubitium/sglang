@@ -3,3 +3,6 @@ ruff python
 
 isort test
 ruff test
+
+isort benchmark
+ruff benchmark

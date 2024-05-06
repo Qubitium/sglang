@@ -4,6 +4,7 @@ from typing import List
 
 import numpy as np
 import torch
+
 from sglang.srt.managers.router.radix_cache import RadixCache
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 
@@ -253,9 +254,8 @@ class Batch:
         extend_num_tokens = seq_lens.sum() - prefix_lens.sum()
         out_cache_loc = self.token_to_kv_pool.alloc(extend_num_tokens)
         if out_cache_loc is None:
-            if not self.tree_cache.disable:
-                self.tree_cache.evict(extend_num_tokens, self.token_to_kv_pool.free)
-                out_cache_loc = self.token_to_kv_pool.alloc(extend_num_tokens)
+            self.tree_cache.evict(extend_num_tokens, self.token_to_kv_pool.dec_refs)
+            out_cache_loc = self.token_to_kv_pool.alloc(extend_num_tokens)
 
             if out_cache_loc is None:
                 print("Prefill out of memory. This should nerver happen.")
@@ -329,8 +329,8 @@ class Batch:
         if self.token_to_kv_pool.available_size() >= bs:
             return True
 
-        if not self.tree_cache.disable:
-            self.tree_cache.evict(bs, self.token_to_kv_pool.free)
+        self.tree_cache.evict(bs, self.token_to_kv_pool.dec_refs)
+
         if self.token_to_kv_pool.available_size() >= bs:
             return True
 
@@ -363,7 +363,7 @@ class Batch:
             token_indices = self.req_to_token_pool.req_to_token[
                 req_pool_indices_np[idx]
             ][: seq_lens_np[idx]]
-            self.token_to_kv_pool.free(token_indices)
+            self.token_to_kv_pool.dec_refs(token_indices)
 
         self.filter_batch(sorted_indices)
 
@@ -394,7 +394,7 @@ class Batch:
                     prefix_len = self.tree_cache.insert(
                         token_ids_in_memory, indices.clone()
                     )
-                    self.token_to_kv_pool.free(indices[:prefix_len])
+                    self.token_to_kv_pool.dec_refs(indices[:prefix_len])
                     self.req_to_token_pool.free(req_pool_idx)
                     self.tree_cache.dec_ref_counter(req.last_node)
 

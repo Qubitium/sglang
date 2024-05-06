@@ -1,7 +1,6 @@
 import asyncio
 import concurrent.futures
 import dataclasses
-import multiprocessing
 import multiprocessing as mp
 import os
 from typing import List
@@ -79,9 +78,9 @@ class TokenizerManager:
     def __init__(
             self,
             server_args: ServerArgs,
-            router_chan: multiprocessing.Queue,
-            detokenizer_chan: multiprocessing.Queue,
-            idle_chan: multiprocessing.Queue,
+            router_chan: mp.Queue,
+            detokenizer_chan: mp.Queue,
+            idle_chan: mp.Queue,
     ):
         # num of pending requests
         self.pending = 0
@@ -147,7 +146,8 @@ class TokenizerManager:
             )
 
     async def generate_request(self, obj: GenerateReqInput):
-        await self.start()
+        if self.to_create_loop:
+            await self.create_handle_loop()
 
         is_single = isinstance(obj.text, str)
 
@@ -287,62 +287,25 @@ class TokenizerManager:
         # self.send_to_router.send_pyobj(flush_cache_req)
         self.router_chan.put_nowait(flush_cache_req)
 
-    async def decoder_loop(self):
-        print("in decoder_loop ")
+    async def create_handle_loop(self):
+        self.to_create_loop = False
+        loop = asyncio.get_event_loop()
+        loop.create_task(self.handle_loop())
+
+    async def handle_loop(self):
         while True:
-            # print(f"detokenizer detokenizer_chan get wait...")
-            recv_obj = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.get)
-            # print(f"detokenizer detokenizer_chan get done: {recv_obj}")
+            recv_obj = await self.recv_from_detokenizer.recv_pyobj()
 
-            output_tokens = recv_obj.output_tokens
-
-            # TODO(lmzheng): handle skip_special_tokens per request
-            output_strs = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.tokenizer.batch_decode,
-                                                                         output_tokens, recv_obj.skip_special_tokens[0]
-                                                                         )
-
-            # Trim stop str
-            # TODO(lmzheng): handle the case where multiple stop strs are hit
-            for i in range(len(output_strs)):
-                if recv_obj.hit_stop_str[i] is not None:
-                    pos = output_strs[i].find(recv_obj.hit_stop_str[i])
-                    if pos != -1:
-                        output_strs[i] = output_strs[i][:pos]
-
-                if len(output_tokens[i]) > 0:
-                    first_token = await asyncio.get_event_loop().run_in_executor(THREAD_POOL,
-                                                                                 self.tokenizer.convert_ids_to_tokens,
-                                                                                 int(output_tokens[i][0])
-                                                                                 )
-
-                    if not isinstance(first_token, str):
-                        first_token = first_token.decode("utf-8", errors="ignore")
-                    if first_token.startswith("▁"):
-                        output_strs[i] = " " + output_strs[i]
-
-                output_strs[i] = (
-                        recv_obj.output_and_jump_forward_strs[i] + output_strs[i]
-                )
-
-            # print(f"detokenizer tokenizer_chan put")
-            output = BatchStrOut(
-                recv_obj.rids,
-                output_strs,
-                recv_obj.meta_info,
-                recv_obj.finished,
-            )
-
-            # previously in another thread/loop
-            for i, rid in enumerate(output.rids):
-                output.meta_info[i]["id"] = rid
-                out_dict = {
-                    "text": output.output_str[i],
-                    "meta_info": output.meta_info[i],
-                }
-                state = self.rid_to_state[rid]
-
-                state.out_list.append(out_dict)
-                state.finished = output.finished[i]
-                # print(f"tokenizer state.event.set ready rid: {rid}")
-                state.event.set()
-                # print(f"tokenizer state.event.set ready done rid: {rid}")
+            if isinstance(recv_obj, BatchStrOut):
+                for i, rid in enumerate(recv_obj.rids):
+                    recv_obj.meta_info[i]["id"] = rid
+                    out_dict = {
+                        "text": recv_obj.output_str[i],
+                        "meta_info": recv_obj.meta_info[i],
+                    }
+                    state = self.rid_to_state[rid]
+                    state.out_list.append(out_dict)
+                    state.finished = recv_obj.finished[i]
+                    state.event.set()
+            else:
+                raise ValueError(f"Invalid object: {recv_obj}")

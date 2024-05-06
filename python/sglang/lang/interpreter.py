@@ -9,7 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional
 
+import contextvars
 import tqdm
+
 from sglang.global_config import global_config
 from sglang.lang.ir import (
     SglCommitLazy,
@@ -216,7 +218,10 @@ class StreamExecutor:
         self.use_thread = use_thread
         if self.use_thread:
             self.queue = queue.Queue()
-            self.worker = threading.Thread(target=self._thread_worker_func)
+
+            def _run_worker_in_context():
+                self._thread_worker_func()
+            self.worker = threading.Thread(target=contextvars.copy_context().run, args=(_run_worker_in_context, ))
             self.worker.start()
 
         # For streaming
