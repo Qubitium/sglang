@@ -4,11 +4,7 @@ import multiprocessing as mp
 import os
 import queue
 
-import uvloop
-import zmq
-import zmq.asyncio
-from sglang.srt.backend_config import GLOBAL_BACKEND_CONFIG
-from sglang.srt.managers.router.model_rpc import ModelRpcClient
+from sglang.srt.managers.router.model import ModelClient
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback
 

@@ -10,7 +10,7 @@ import rpyc
 import torch
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
-from vllm.logger import _default_handler as vllm_default_handler
+from vllm.logger import logger as vllm_default_handler
 
 from sglang.srt.constrained.fsm_cache import FSMCache
 from sglang.srt.constrained.jump_forward import JumpForwardCache

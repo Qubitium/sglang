@@ -58,21 +58,21 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 API_KEY_HEADER_NAME = "X-API-Key"
 
 
-class APIKeyValidatorMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, api_key: str):
-        super().__init__(app)
-        self.api_key = api_key
-
-    async def dispatch(self, request: Request, call_next):
-        # extract API key from the request headers
-        api_key_header = request.headers.get(API_KEY_HEADER_NAME)
-        if not api_key_header or api_key_header != self.api_key:
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Invalid API Key"},
-            )
-        response = await call_next(request)
-        return response
+# class APIKeyValidatorMiddleware(BaseHTTPMiddleware):
+#     def __init__(self, app, api_key: str):
+#         super().__init__(app)
+#         self.api_key = api_key
+#
+#     async def dispatch(self, request: Request, call_next):
+#         # extract API key from the request headers
+#         api_key_header = request.headers.get(API_KEY_HEADER_NAME)
+#         if not api_key_header or api_key_header != self.api_key:
+#             return JSONResponse(
+#                 status_code=403,
+#                 content={"detail": "Invalid API Key"},
+#             )
+#         response = await call_next(request)
+#         return response
 
 
 # app = FastAPI()

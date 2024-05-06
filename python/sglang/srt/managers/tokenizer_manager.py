@@ -117,6 +117,7 @@ class TokenizerManager:
                 trust_remote_code=server_args.trust_remote_code,
             )
 
+        self.to_create_loop = True
         self.rid_to_state = {}  # Dict[str -> ReqState]
         self.decoder_task = None
 
