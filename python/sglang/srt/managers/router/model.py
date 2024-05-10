@@ -591,6 +591,8 @@ class ModelServer():
                     - req.prompt_tokens,
                     "completion_tokens_ids": req.output_ids,
                     "completion_tokens_wo_jump_forward": req.completion_tokens_wo_jump_forward,
+                    "finish_reason": req.finish_reason,
+                    "hit_stop_str": req.hit_stop_str,
                 }
                 if req.return_logprob:
                     (

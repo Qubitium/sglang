@@ -1,15 +1,15 @@
 """The interpreter that executes SGL programs"""
 
 import asyncio
+import contextvars
 import multiprocessing
 import queue
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
-import contextvars
 import tqdm
 
 from sglang.global_config import global_config
@@ -19,6 +19,7 @@ from sglang.lang.ir import (
     SglConstantText,
     SglExpr,
     SglExprList,
+    SglFunction,
     SglGen,
     SglImage,
     SglRoleBegin,
@@ -221,7 +222,10 @@ class StreamExecutor:
 
             def _run_worker_in_context():
                 self._thread_worker_func()
-            self.worker = threading.Thread(target=contextvars.copy_context().run, args=(_run_worker_in_context, ))
+
+            self.worker = threading.Thread(
+                target=contextvars.copy_context().run, args=(_run_worker_in_context,)
+            )
             self.worker.start()
 
         # For streaming
@@ -264,14 +268,12 @@ class StreamExecutor:
         self,
         size: int = 1,
         position_ids_offset: Optional[List[int]] = None,
-        copy: bool = False,
     ):
-        size = int(size)
-        assert(size >= 1)
-
-        if size > 1 or copy:
+        if size > 1:
             self.submit(SglCommitLazy())
-            self.sync()
+
+        self.sync()
+        size = int(size)
 
         exes = [
             StreamExecutor(
@@ -657,16 +659,15 @@ class ProgramState:
         self,
         size: int = 1,
         position_ids_offset: Optional[List[int]] = None,
-        copy: bool = False,
     ):
-        stream_executors = self.stream_executor.fork(size, position_ids_offset, copy)
+        stream_executors = self.stream_executor.fork(size, position_ids_offset)
         states = [ProgramState(x) for x in stream_executors]
         state_group = ProgramStateGroup(states, self)
         return state_group
 
     @contextmanager
     def copy(self, position_ids_offset: Optional[List[int]] = None):
-        state_group = self.fork(1, position_ids_offset, True)
+        state_group = self.fork(1, position_ids_offset)
         try:
             yield state_group[0]
         finally:
