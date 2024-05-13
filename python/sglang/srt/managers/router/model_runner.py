@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.distributed import initialize_model_parallel
+from vllm.distributed import init_distributed_environment, ensure_model_parallel_initialized
 
 from sglang.srt.managers.router.infer_batch import Batch, ForwardMode
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
@@ -278,15 +278,15 @@ class ModelRunner:
 
         # Init torch distributed
         torch.cuda.set_device(self.tp_rank)
-        torch.distributed.init_process_group(
-            backend="nccl",
+        backend = "nccl"
+        init_distributed_environment(
+            backend=backend,
             world_size=self.tp_size,
             rank=self.tp_rank,
-            init_method=f"tcp://127.0.0.1:{self.nccl_port}",
+            distributed_init_method=f"tcp://127.0.0.1:{self.nccl_port}",
         )
-
-        initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
-
+        ensure_model_parallel_initialized(tensor_model_parallel_size=self.tp_size, pipeline_model_parallel_size=1,
+                                          backend=backend)
         total_gpu_memory = get_available_gpu_memory(
             self.tp_rank, distributed=self.tp_size > 1
         ) * (1 << 30)
