@@ -1,3 +1,5 @@
+"""Common utilities."""
+
 import base64
 import os
 import random
@@ -5,10 +7,12 @@ import socket
 import sys
 import time
 import traceback
+from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
 from typing import List, Optional
 
 import numpy as np
+import pydantic
 import requests
 import torch
 import torch.distributed as dist
@@ -19,6 +23,11 @@ from typing import (
     Callable,
     TypeVar,
 )
+from fastapi.responses import JSONResponse
+from packaging import version as pkg_version
+from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+import asyncio
 
 show_time_cost = False
 time_infos = {}
@@ -126,10 +135,10 @@ def check_port(port):
             return False
 
 
-def handle_port_init(
-    port: Optional[int] = None,
-    additional_ports: Optional[List[int]] = None,
-    tp_size: int = 1,
+def allocate_init_ports(
+        port: Optional[int] = None,
+        additional_ports: Optional[List[int]] = None,
+        tp_size: int = 1,
 ):
     port = 30000 if port is None else port
     additional_ports = [] if additional_ports is None else additional_ports
@@ -165,8 +174,6 @@ def get_exception_traceback():
 
 
 def get_int_token_logit_bias(tokenizer, vocab_size):
-    from transformers import LlamaTokenizer, LlamaTokenizerFast
-
     # a bug when model's vocab size > tokenizer.vocab_size
     vocab_size = tokenizer.vocab_size
     logit_bias = np.zeros(vocab_size, dtype=np.float32)
@@ -276,8 +283,10 @@ def load_image(image_file):
 
     return image
 
+
 T = TypeVar("T")
 THREAD_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="manager")
+
 
 def make_async_thread(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
@@ -294,6 +303,7 @@ def make_async_thread(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
         return asyncio.get_event_loop().run_in_executor(executor=THREAD_EXECUTOR, func=p_func)
 
     return _async_wrapper
+
 
 def mark_cost_time(func_name):
     def inner_func(func):
@@ -314,3 +324,45 @@ def mark_cost_time(func_name):
         return time_func
 
     return inner_func
+
+
+def assert_pkg_version(pkg: str, min_version: str):
+    try:
+        installed_version = version(pkg)
+        if pkg_version.parse(installed_version) < pkg_version.parse(min_version):
+            raise Exception(
+                f"{pkg} is installed with version {installed_version} which "
+                f"is less than the minimum required version {min_version}"
+            )
+    except PackageNotFoundError:
+        raise Exception(f"{pkg} with minimum required version {min_version} is not installed")
+
+
+API_KEY_HEADER_NAME = "X-API-Key"
+
+
+class APIKeyValidatorMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, api_key: str):
+        super().__init__(app)
+        self.api_key = api_key
+
+    async def dispatch(self, request, call_next):
+        # extract API key from the request headers
+        api_key_header = request.headers.get(API_KEY_HEADER_NAME)
+        if not api_key_header or api_key_header != self.api_key:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Invalid API Key"},
+            )
+        response = await call_next(request)
+        return response
+
+
+# FIXME: Remove this once we drop support for pydantic 1.x
+IS_PYDANTIC_1 = int(pydantic.VERSION.split(".")[0]) == 1
+
+
+def jsonify_pydantic_model(obj: BaseModel):
+    if IS_PYDANTIC_1:
+        return obj.json(ensure_ascii=False)
+    return obj.model_dump_json()
