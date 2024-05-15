@@ -224,8 +224,10 @@ class TokenizerManager:
         else:
             # print(f"tokenizer generate_request multiple request")
             assert obj.stream is False
-
-            bs = len(obj.text)
+            if obj.input_ids is None:
+                bs = len(obj.text)
+            else:
+                bs = len(obj.input_ids)
             self.pending += bs
             # print(f"PENDING {self.pending}")
 
