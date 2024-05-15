@@ -310,8 +310,12 @@ class ModelRunner:
 
         import triton
 
+        model_type = getattr(
+            self.model_config.hf_config, "model_type", None
+        )
+
         # quant models can only operate in  float16 and non-quant has no such limitation
-        if quant_cfg is not None:
+        if quant_cfg is not None or model_type == "llava":  # llava only supports float16.
             self.torch_dtype = torch.float16
             self.triton_dtype = triton.language.float16
         else:
