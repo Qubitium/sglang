@@ -17,6 +17,7 @@ class SeparatorStyle(IntEnum):
     NO_COLON_TWO = auto()
     ADD_NEW_LINE_SINGLE = auto()
     LLAMA2 = auto()
+    LLAMA3 = auto()
     CHATGLM = auto()
     CHATML = auto()
     CHATINTERN = auto()
@@ -57,6 +58,7 @@ class Conversation:
     def get_prompt(self) -> str:
         """Get the prompt for generation."""
         system_prompt = self.system_template.format(system_message=self.system_message)
+
         if self.sep_style == SeparatorStyle.ADD_COLON_SINGLE:
             ret = system_prompt + self.sep
             for role, message in self.messages:
@@ -244,6 +246,21 @@ class Conversation:
         else:
             raise ValueError(f"Invalid style: {self.sep_style}")
 
+    def get_prompt_with_tokenizer(self, tokenizer):
+        if self.sep_style == SeparatorStyle.LLAMA3:
+            chat_template_messages = [{"role": "system", "content": self.system_message}]
+            for role, message in self.messages:
+                if message:
+                    if type(message) is tuple:
+                        message, images = message
+                        message = "<image>" * len(images) + message
+                    chat_template_messages.append({"role": role, "content": message})
+
+            return tokenizer.apply_chat_template(chat_template_messages, tokenize=False,
+                                                      add_generation_prompt=True)
+        else:
+            raise ValueError(f"Currently only supports llama3: sep_style is {self.sep_style}")
+
     def set_system_message(self, system_message: str):
         """Set the system message."""
         self.system_message = system_message
@@ -359,7 +376,7 @@ def generate_chat_conv(
             # Handle the various types of Chat Request content types here.
             role = conv.roles[0]
             if isinstance(message.content, str):
-                conv.append_message(conv.roles[0], message.content)
+                conv.append_message(role, message.content)
             else:
                 real_content = ""
                 for content in message.content:
@@ -367,9 +384,10 @@ def generate_chat_conv(
                         real_content += content.text
                     elif content.type == "image_url":
                         # NOTE: Only works for llava
-                        real_content += "<image>\n"
+                        real_content += ("<image>\n"
+                                         "# llama3")
                         conv.append_image(content.image_url.url)
-                conv.append_message(conv.roles[0], real_content)
+                conv.append_message(role, real_content)
         elif msg_role == "assistant":
             conv.append_message(conv.roles[1], message.content)
         else:
@@ -395,6 +413,15 @@ register_conv_template(
         stop_str=["[INST]", "[/INST]", "<<SYS>>", "<</SYS>>"],
     )
 )
+
+register_conv_template(
+    Conversation(
+        name="llama-3",
+        sep_style=SeparatorStyle.LLAMA3,
+        stop_str=["<|eot_id|>"],
+    )
+)
+
 
 register_conv_template(
     Conversation(
