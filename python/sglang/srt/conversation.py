@@ -384,8 +384,7 @@ def generate_chat_conv(
                         real_content += content.text
                     elif content.type == "image_url":
                         # NOTE: Only works for llava
-                        real_content += ("<image>\n"
-                                         "# llama3")
+                        real_content += ("<image>\n")
                         conv.append_image(content.image_url.url)
                 conv.append_message(role, real_content)
         elif msg_role == "assistant":
