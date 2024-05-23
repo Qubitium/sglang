@@ -471,7 +471,6 @@ class Batch:
             "presence_penalties",
             "repetition_penalties",
             "logit_bias",
-            "logits_processors",
         ]:
             self_val = getattr(self, item, None)
             # logit_bias can be None
