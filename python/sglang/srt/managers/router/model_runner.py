@@ -101,7 +101,7 @@ class InputMetadata:
     prefill_wrapper = None
     decode_wrapper = None
 
-    logits_processors: Optional[List[LogitsProcessor]] = None
+    logits_processors: Optional[List[List[LogitsProcessor]]] = None
 
     def init_flashinfer_args(self, model_runner, tp_size):
         from flashinfer import (

@@ -103,10 +103,10 @@ class Req:
             # TODO(lmzheng): This can be wrong. Check with Liangsheng.
             self.input_text = self.tokenizer.decode(self.input_ids)
         new_input_string = (
-            self.input_text
-            + self.output_and_jump_forward_str
-            + old_output_str
-            + jump_forward_str
+                self.input_text
+                + self.output_and_jump_forward_str
+                + old_output_str
+                + jump_forward_str
         )
         new_input_ids = self.tokenizer.encode(new_input_string)
         if self.pixel_values is not None:
@@ -114,7 +114,7 @@ class Req:
             jump_forward_tokens_len = len(self.tokenizer.encode(jump_forward_str))
         else:
             jump_forward_tokens_len = (
-                len(new_input_ids) - len(self.input_ids) - len(self.output_ids)
+                    len(new_input_ids) - len(self.input_ids) - len(self.output_ids)
             )
 
         # print("=" * 100)
@@ -129,7 +129,7 @@ class Req:
         )
         self.regex_fsm_state = next_state
         self.output_and_jump_forward_str = (
-            self.output_and_jump_forward_str + old_output_str + jump_forward_str
+                self.output_and_jump_forward_str + old_output_str + jump_forward_str
         )
 
         # print(f"Output and jump forward str:\n{self.output_and_jump_forward_str}")
@@ -145,8 +145,8 @@ class Req:
             return
 
         if (
-            self.output_ids[-1] == self.tokenizer.eos_token_id
-            and self.sampling_params.ignore_eos == False
+                self.output_ids[-1] == self.tokenizer.eos_token_id
+                and self.sampling_params.ignore_eos == False
         ):
             self.finished = True
             self.finish_reason = FinishReason.EOS_TOKEN
@@ -154,7 +154,7 @@ class Req:
 
         if len(self.sampling_params.stop_strs) > 0:
             tail_str = self.tokenizer.decode(
-                self.output_ids[-(self.sampling_params.stop_str_max_len + 1) :]
+                self.output_ids[-(self.sampling_params.stop_str_max_len + 1):]
             )
 
             for stop_str in self.sampling_params.stop_strs:
@@ -230,7 +230,7 @@ class Batch:
         device = "cuda"
         bs = len(self.reqs)
         reqs = self.reqs
-        input_ids = [r.input_ids[len(r.prefix_indices) :] for r in reqs]
+        input_ids = [r.input_ids[len(r.prefix_indices):] for r in reqs]
         prefix_indices = [r.prefix_indices for r in reqs]
 
         # Handle prefix
@@ -250,7 +250,7 @@ class Batch:
             else:
                 prefix_lens.append(len(prefix_indices[i]))
                 self.req_to_token_pool.req_to_token[req_pool_indices_cpu[i]][
-                    : len(prefix_indices[i])
+                : len(prefix_indices[i])
                 ] = prefix_indices[i]
 
             seq_lens.append(prefix_lens[-1] + extend_lens[-1])
@@ -273,8 +273,8 @@ class Batch:
         pt = 0
         for i in range(bs):
             self.req_to_token_pool.req_to_token[req_pool_indices_cpu[i]][
-                prefix_lens[i] : prefix_lens[i] + extend_lens[i]
-            ] = out_cache_loc[pt : pt + extend_lens[i]]
+            prefix_lens[i]: prefix_lens[i] + extend_lens[i]
+            ] = out_cache_loc[pt: pt + extend_lens[i]]
             pt += extend_lens[i]
 
         # Handle logit bias but only allocate when needed
@@ -331,9 +331,7 @@ class Batch:
             device=device,
         ).view(-1, 1)
         self.logit_bias = logit_bias
-        # TODO When we make batch requests, we only use the logits_processors of one Request.
-        if len(reqs) > 0:
-            self.logits_processors = reqs[0].sampling_params.logits_processors
+        self.logits_processors = [r.sampling_params.logits_processors for r in reqs]
 
     def check_decode_mem(self):
         bs = len(self.reqs)
@@ -372,8 +370,8 @@ class Batch:
             # TODO: apply more fine-grained retraction
 
             token_indices = self.req_to_token_pool.req_to_token[
-                req_pool_indices_cpu[idx]
-            ][: seq_lens_cpu[idx]]
+                                req_pool_indices_cpu[idx]
+                            ][: seq_lens_cpu[idx]]
             self.token_to_kv_pool.dec_refs(token_indices)
 
         self.filter_batch(sorted_indices)
@@ -400,8 +398,8 @@ class Batch:
                         req_pool_indices_cpu = self.req_pool_indices.tolist()
                     req_pool_idx = req_pool_indices_cpu[i]
                     indices = self.req_to_token_pool.req_to_token[
-                        req_pool_idx, : len(token_ids_in_memory)
-                    ]
+                              req_pool_idx, : len(token_ids_in_memory)
+                              ]
                     prefix_len = self.tree_cache.insert(
                         token_ids_in_memory, indices.clone()
                     )
@@ -471,6 +469,7 @@ class Batch:
             "presence_penalties",
             "repetition_penalties",
             "logit_bias",
+            "logits_processors",
         ]:
             self_val = getattr(self, item, None)
             # logit_bias can be None
@@ -499,6 +498,7 @@ class Batch:
             "frequency_penalties",
             "presence_penalties",
             "repetition_penalties",
+            "logits_processors",
         ]:
             self_val = getattr(self, item, None)
             other_val = getattr(other, item, None)
@@ -528,7 +528,8 @@ class Batch:
         # Referring to the transformers execution order, repetition_penalty should come before temperatures.
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
         if self.output_tokens is not None and len(self.output_tokens) > 0:
-            assert len(self.output_tokens) == len(self.repetition_penalties)
+            assert len(self.output_tokens) == len(
+                self.repetition_penalties), f"output_tokens({self.output_tokens}) don't match repetition_penalties({self.repetition_penalties})"
             for i, r in enumerate(self.repetition_penalties):
                 # If any of the repetition_penalties values is 1, only apply_repetition_penalty() that is not 1 is executed.
                 if not (r == 1.0).item():
@@ -578,6 +579,6 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sort[(probs_sum - probs_sort) > top_ps] = 0.0
     probs_sort[
         torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1) >= top_ks
-    ] = 0.0
+        ] = 0.0
     probs_sort.div_(probs_sort.max(dim=-1, keepdim=True)[0])
     return probs_sort, probs_idx
