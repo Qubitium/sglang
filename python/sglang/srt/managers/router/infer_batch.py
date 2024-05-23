@@ -8,6 +8,8 @@ import torch
 from sglang.srt.managers.router.radix_cache import RadixCache
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 
+from python.sglang.srt.sampling_params import CustomLogitsProcessor
+
 
 class ForwardMode(IntEnum):
     PREFILL = auto()
@@ -206,25 +208,25 @@ class Batch:
     presence_penalties: torch.Tensor = None
     repetition_penalties: torch.Tensor = None
     logit_bias: torch.Tensor = None
-    logits_processors = None
 
     # for repetition_penalty
     output_tokens = None
 
     @classmethod
     def init_new(cls, reqs, req_to_token_pool, token_to_kv_pool, tree_cache):
-        return_logprob = any(req.return_logprob for req in reqs)
-
         return cls(
             reqs=reqs,
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool=token_to_kv_pool,
             tree_cache=tree_cache,
-            return_logprob=return_logprob,
+            return_logprob=any(req.return_logprob for req in reqs),
         )
 
     def is_empty(self):
         return len(self.reqs) == 0
+
+    def custom_logits_processors(self) -> List[CustomLogitsProcessor]:
+        return [r.sampling_params.logits_processors for r in self.reqs]
 
     def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor, logits_dtype: torch.dtype):
         device = "cuda"
