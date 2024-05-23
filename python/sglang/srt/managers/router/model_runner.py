@@ -432,7 +432,7 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
-            logits_processors=batch.logits_processors,
+            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -453,7 +453,7 @@ class ModelRunner:
             out_cache_cont_end=batch.out_cache_cont_end,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
-            logits_processors=batch.logits_processors,
+            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -472,7 +472,7 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
-            logits_processors=batch.logits_processors,
+            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids,

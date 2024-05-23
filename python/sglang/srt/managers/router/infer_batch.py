@@ -225,7 +225,7 @@ class Batch:
     def is_empty(self):
         return len(self.reqs) == 0
 
-    def custom_logits_processors(self) -> List[CustomLogitsProcessor]:
+    def custom_logits_processors(self) -> List[List[CustomLogitsProcessor]]:
         return [r.sampling_params.logits_processors for r in self.reqs]
 
     def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor, logits_dtype: torch.dtype):
@@ -333,7 +333,6 @@ class Batch:
             device=device,
         ).view(-1, 1)
         self.logit_bias = logit_bias
-        self.logits_processors = [r.sampling_params.logits_processors for r in reqs]
 
     def check_decode_mem(self):
         bs = len(self.reqs)
@@ -499,7 +498,6 @@ class Batch:
             "frequency_penalties",
             "presence_penalties",
             "repetition_penalties",
-            "logits_processors",
         ]:
             self_val = getattr(self, item, None)
             other_val = getattr(other, item, None)

@@ -87,7 +87,8 @@ class LogitsProcessor(nn.Module):
             last_logits = tensor_model_parallel_all_gather(last_logits)
         last_logits = last_logits[:, : self.config.vocab_size]
 
-        if last_logits is not None:
+        if last_logits is not None and input_metadata.logits_processors is not None and len(
+                input_metadata.logits_processors) > 0:
             if input_metadata.batch_size == len(input_ids):
                 last_ids = input_ids
             else:  # If it is the first forward of a batch, last_id needs to be obtained based on index.
@@ -95,11 +96,10 @@ class LogitsProcessor(nn.Module):
                 for i, seq_len in enumerate(input_metadata.seq_lens):
                     prefix_len = input_metadata.prefix_lens[i]
                     last_ids.append(input_ids[seq_len - prefix_len - 1])
-
             for i, logits_processors in enumerate(input_metadata.logits_processors):
                 last_id = last_ids[i]
                 logits = last_logits[i]
-                for logits_processor in input_metadata.logits_processors:
+                for logits_processor in logits_processors:
                     logits = logits_processor(last_id, logits)
                 last_logits[i] = logits
 
