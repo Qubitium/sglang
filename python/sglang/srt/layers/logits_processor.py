@@ -17,8 +17,6 @@ class LogitsProcessor(nn.Module):
         super().__init__()
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
-        # self.logits_processor = global_config.logits_processor
-        self.logits_processor = TokenControlLogitsProcessor()
 
     def _get_normalized_prompt_logprobs(
             self, prefill_token_logprobs, input_metadata: InputMetadata
@@ -74,15 +72,6 @@ class LogitsProcessor(nn.Module):
             return prefill_top_logprobs, decode_top_logprobs
 
     def forward(self, input_ids, hidden_states, weight, input_metadata: InputMetadata):
-        if input_metadata.batch_size == len(input_ids):
-            last_ids = input_ids
-        else:
-            # If it is the first forward of a batch, last_id needs to be obtained based on index.
-            last_ids = []
-            for i, seq_len in enumerate(input_metadata.seq_lens):
-                prefix_len = input_metadata.prefix_lens[i]
-                last_ids.append(input_ids[seq_len - prefix_len - 1])
-
         # Get last index for next token prediction, except for DECODE mode.
         last_index = None
         if input_metadata.forward_mode != ForwardMode.DECODE:
@@ -102,8 +91,17 @@ class LogitsProcessor(nn.Module):
             last_logits = tensor_model_parallel_all_gather(last_logits)
         last_logits = last_logits[:, : self.config.vocab_size]
 
-        if last_logits is not None:
-            last_logits = self.logits_processor(last_ids, last_logits)
+        if last_logits is not None and input_metadata.logits_processors is not None and len(
+                input_metadata.logits_processors) > 0:
+            if input_metadata.batch_size == len(input_ids):
+                last_ids = input_ids
+            else:  # If it is the first forward of a batch, last_id needs to be obtained based on index.
+                last_ids = []
+                for i, seq_len in enumerate(input_metadata.seq_lens):
+                    prefix_len = input_metadata.prefix_lens[i]
+                    last_ids.append(input_ids[seq_len - prefix_len - 1])
+            for logits_processor in input_metadata.logits_processors:
+                last_logits = logits_processor(last_ids, last_logits)
 
         # Return only last_logits if logprob is not requested
         if not input_metadata.return_logprob:

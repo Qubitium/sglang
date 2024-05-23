@@ -1,9 +1,14 @@
 """Sampling parameters for text generation."""
 
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Callable
+import torch
 
 _SAMPLING_EPS = 1e-6
 
+LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
+"""LogitsProcessor is a function that takes a list of previously generated
+tokens and a tensor of the logits for the next token, and returns a modified
+tensor of logits to sample from."""
 
 class SamplingParams:
     def __init__(
@@ -21,6 +26,7 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         dtype: Optional[str] = None,
         regex: Optional[str] = None,
+        logits_processors: Optional[List[LogitsProcessor]] = None,
     ) -> None:
         self.temperature = temperature
         self.top_p = top_p
@@ -35,6 +41,7 @@ class SamplingParams:
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.dtype = dtype
         self.regex = regex
+        self.logits_processors = logits_processors
 
         # Process some special cases
         if self.temperature < _SAMPLING_EPS:

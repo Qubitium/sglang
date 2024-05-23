@@ -206,6 +206,7 @@ class Batch:
     presence_penalties: torch.Tensor = None
     repetition_penalties: torch.Tensor = None
     logit_bias: torch.Tensor = None
+    logits_processors = None
 
     # for repetition_penalty
     output_tokens = None
@@ -330,6 +331,9 @@ class Batch:
             device=device,
         ).view(-1, 1)
         self.logit_bias = logit_bias
+        # TODO When we make batch requests, we only use the logits_processors of one Request.
+        if len(reqs) > 0:
+            self.logits_processors = reqs[0].sampling_params.logits_processors
 
     def check_decode_mem(self):
         bs = len(self.reqs)
