@@ -7,10 +7,6 @@ from vllm.distributed import (
 
 from sglang.srt.managers.router.model_runner import ForwardMode, InputMetadata
 
-from sglang import global_config
-
-from sglang.srt.layers.token_control_logits_processor import TokenControlLogitsProcessor
-
 
 class LogitsProcessor(nn.Module):
     def __init__(self, config):
