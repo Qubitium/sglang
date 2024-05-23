@@ -22,7 +22,7 @@ from sglang.srt.managers.router.infer_batch import Batch, ForwardMode
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 from sglang.srt.utils import is_multimodal_model
 from sglang.utils import get_available_gpu_memory
-from sglang.srt.sampling_params import LogitsProcessor
+from sglang.srt.sampling_params import CustomLogitsProcessor
 
 QUANTIONCONFIG_MAPPING = {"awq": AWQConfig, "gptq": GPTQConfig, "marlin": MarlinConfig}
 
@@ -101,7 +101,7 @@ class InputMetadata:
     prefill_wrapper = None
     decode_wrapper = None
 
-    logits_processors: Optional[List[List[LogitsProcessor]]] = None
+    logits_processors: Optional[List[List[CustomLogitsProcessor]]] = None
 
     def init_flashinfer_args(self, model_runner, tp_size):
         from flashinfer import (

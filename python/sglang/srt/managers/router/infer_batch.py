@@ -7,8 +7,7 @@ import torch
 
 from sglang.srt.managers.router.radix_cache import RadixCache
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
-
-from python.sglang.srt.sampling_params import CustomLogitsProcessor
+from sglang.srt.sampling_params import CustomLogitsProcessor
 
 
 class ForwardMode(IntEnum):
