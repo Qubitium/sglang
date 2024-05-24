@@ -208,9 +208,6 @@ class Batch:
     repetition_penalties: torch.Tensor = None
     logit_bias: torch.Tensor = None
 
-    special_tokens_repetition_penalty = None
-    special_tokens = None
-
     # for repetition_penalty
     output_tokens = None
 
@@ -336,12 +333,6 @@ class Batch:
         ).view(-1, 1)
 
         self.logit_bias = logit_bias
-
-        # bfloat16 has 7 bits used to represent decimals.
-        # Its minimum increment is 1/2^7 , which is approximately equal to 0.0078.
-        self.special_tokens_repetition_penalty = torch.tensor([1.0078], dtype=logits_dtype,
-                                                              device=device)
-        self.special_tokens = [255019, 255020, 255021]
 
     def check_decode_mem(self):
         bs = len(self.reqs)
@@ -542,10 +533,6 @@ class Batch:
                 # If any of the repetition_penalties values is 1, only apply_repetition_penalty() that is not 1 is executed.
                 if not (r == 1.0).item():
                     apply_repetition_penalty(r, self.output_tokens[i], logits[i], dim=0)
-                else:
-                    # special token
-                    apply_repetition_penalty(self.special_tokens_repetition_penalty,
-                                             self.special_tokens, logits[i], dim=0)
 
         logits.div_(self.temperatures)
 
