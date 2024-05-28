@@ -1,11 +1,16 @@
 # Adapted from
-# https://github.com/vllm-project/vllm/blob/671af2b1c0b3ed6d856d37c21a561cc429a10701/vllm/model_executor/models/llama.py#L1
+# https://github.com/vllm-project/vllm/blob/c7f2cf2b7f67bce5842fedfdba508440fe257375/vllm/model_executor/models/llama.py#L1
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Iterable
 
 import torch
+import tqdm
 from torch import nn
 from transformers import LlamaConfig
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -13,24 +18,17 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-)
-from sglang.srt.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.managers.router.model_runner import InputMetadata
+from sglang.srt.managers.controller.model_runner import InputMetadata
 
 
 class LlamaMLP(nn.Module):
@@ -49,7 +47,10 @@ class LlamaMLP(nn.Module):
             quant_config=quant_config,
         )
         self.down_proj = RowParallelLinear(
-            intermediate_size, hidden_size, bias=False, quant_config=quant_config,
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -155,6 +156,10 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
+        if rope_scaling is not None and getattr(
+                config, "original_max_position_embeddings", None):
+            rope_scaling["original_max_position_embeddings"] = (
+                config.original_max_position_embeddings)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
@@ -273,13 +278,7 @@ class LlamaForCausalLM(nn.Module):
             input_ids, hidden_states, self.lm_head.weight, input_metadata
         )
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
-    ):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -289,9 +288,9 @@ class LlamaForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+        if get_tensor_model_parallel_rank() == 0:
+            weights = tqdm.tqdm(weights, total=int(len(params_dict) * 1.5))
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name or "projector" in name:
                 continue
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:

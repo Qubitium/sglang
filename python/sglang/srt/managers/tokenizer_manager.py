@@ -8,6 +8,7 @@ from typing import List
 import numpy as np
 import transformers
 import uvloop
+from fastapi import BackgroundTasks
 from sglang.srt.hf_transformers_utils import (
     get_config,
     get_context_length,
@@ -15,6 +16,7 @@ from sglang.srt.hf_transformers_utils import (
     get_tokenizer,
 )
 from sglang.srt.managers.io_struct import (
+    AbortReq,
     BatchStrOut,
     DetokenizeReqInput,
     FlushCacheReq,
@@ -23,8 +25,9 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling_params import SamplingParams
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_image
+from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.utils import is_multimodal_model, load_image
+from sglang.utils import get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -38,43 +41,7 @@ class ReqState:
     event: asyncio.Event
 
 
-global global_processor
-
 THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-
-
-def init_global_processor(server_args: ServerArgs):
-    global global_processor
-    transformers.logging.set_verbosity_error()
-    global_processor = get_processor(
-        server_args.tokenizer_path,
-        tokenizer_mode=server_args.tokenizer_mode,
-        trust_remote_code=server_args.trust_remote_code,
-    )
-
-
-def get_pixel_values(
-        image_data, image_aspect_ratio=None, image_grid_pinpoints=None, processor=None
-):
-    try:
-        processor = processor or global_processor
-        image = load_image(image_data)
-        image_hash = hash(image_data)
-        if image_aspect_ratio == "pad":
-            image = expand2square(
-                image, tuple(int(x * 255) for x in processor.image_processor.image_mean)
-            )
-            pixel_values = processor.image_processor(image)["pixel_values"][0]
-        elif image_aspect_ratio == "anyres":
-            pixel_values = process_anyres_image(
-                image, processor.image_processor, image_grid_pinpoints
-            )
-        else:
-            pixel_values = processor.image_processor(image)["pixel_values"][0]
-        pixel_values = pixel_values.astype(np.float16)
-        return pixel_values, image_hash, image.size
-    except Exception:
-        print("Exception in TokenizerManager:\n" + get_exception_traceback())
 
 
 class TokenizerManager:
@@ -84,6 +51,7 @@ class TokenizerManager:
             router_chan: mp.Queue,
             detokenizer_chan: mp.Queue,
             idle_chan: mp.Queue,
+            model_overide_args: dict = None,
     ):
         # num of pending requests
         self.pending = 0
@@ -95,9 +63,10 @@ class TokenizerManager:
 
         self.model_path = server_args.model_path
         self.hf_config = get_config(
-            self.model_path, trust_remote_code=server_args.trust_remote_code
+            self.model_path,
+            trust_remote_code=server_args.trust_remote_code,
+            model_overide_args=model_overide_args,
         )
-
         self.context_len = get_context_length(self.hf_config)
 
         if is_multimodal_model(self.model_path):
@@ -149,9 +118,10 @@ class TokenizerManager:
                 image_data, aspect_ratio, grid_pinpoints, self.processor
             )
 
-    async def generate_request(self, obj: GenerateReqInput):
+    async def generate_request(self, obj: GenerateReqInput, request=None):
         await self.start()
 
+        obj.post_init()
         is_single = obj.is_single
         if is_single:
             self.pending += 1
@@ -163,6 +133,12 @@ class TokenizerManager:
                 input_ids = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.tokenizer.encode, obj.text)
             else:
                 input_ids = obj.input_ids
+
+            if len(input_ids) >= self.context_len:
+                raise ValueError(
+                    f"The input ({len(input_ids)} tokens) is longer than the "
+                    f"model's context length ({self.context_len} tokens)."
+                )
 
             sampling_params = SamplingParams(**obj.sampling_params)
             if sampling_params.max_new_tokens != 0:
@@ -202,6 +178,12 @@ class TokenizerManager:
 
             # print(f"tokenizer generate request single wait for event rid: {rid}")
             await event.wait()
+            # try:
+            #     await asyncio.wait_for(event.wait(), timeout=4)
+            # except asyncio.TimeoutError:
+            #     if request is not None and await request.is_disconnected():
+            #         self.abort_request(rid)
+            #         raise ValueError(f"Abort request {rid}")
 
             self.pending -= 1
             assert self.pending >= 0
@@ -217,13 +199,16 @@ class TokenizerManager:
 
             # print(f"tokenizer generate request single wait for event done rid: {rid}")
             yield self.convert_logprob_style(state.out_list[-1],
-                                                 obj.return_logprob,
-                                                 obj.top_logprobs_num,
-                                                 obj.return_text_in_logprobs)
+                                             obj.return_logprob,
+                                             obj.top_logprobs_num,
+                                             obj.return_text_in_logprobs)
 
         else:
             # print(f"tokenizer generate_request multiple request")
             assert obj.stream is False
+            if obj.stream:
+                raise ValueError("Do not support stream for batch mode.")
+
             if obj.input_ids is None:
                 bs = len(obj.text)
             else:
@@ -280,13 +265,24 @@ class TokenizerManager:
                 state = self.rid_to_state[rid]
                 # print("tokenizer generate request multiple wait for event")
                 await state.event.wait()
+                # try:
+                #     await asyncio.wait_for(state.event.wait(), timeout=4)
+                #     break
+                # except asyncio.TimeoutError:
+                #     if request is not None and await request.is_disconnected():
+                #         for rid in obj.rid:
+                #             self.abort_request(rid)
+                #         raise ValueError(f"Abort request {rid}")
 
                 # print("tokenizer generate request multiple wait for event complete")
                 output_list.append(
-                    self.convert_logprob_style(state.out_list[-1],
-                                               obj.return_logprob[i],
-                                               obj.top_logprobs_num[i],
-                                               obj.return_text_in_logprobs))
+                    self.convert_logprob_style(
+                        state.out_list[-1],
+                        obj.return_logprob[i],
+                        obj.top_logprobs_num[i],
+                        obj.return_text_in_logprobs,
+                    )
+                )
                 assert state.finished
 
                 del self.rid_to_state[rid]
@@ -311,6 +307,32 @@ class TokenizerManager:
         # self.send_to_router.send_pyobj(flush_cache_req)
         self.router_chan.put_nowait(flush_cache_req)
 
+    def abort_request(self, rid):
+        if rid not in self.rid_to_state:
+            return
+        del self.rid_to_state[rid]
+        req = AbortReq(rid)
+        self.send_to_router.send_pyobj(req)
+
+    def create_abort_task(self, obj):
+        # Abort the request if the client is disconnected.
+        async def abort_request():
+            await asyncio.sleep(3)
+            if obj.is_single:
+                self.abort_request(obj.rid)
+            else:
+                for rid in obj.rids:
+                    self.abort_request(rid)
+
+        background_tasks = BackgroundTasks()
+        background_tasks.add_task(abort_request)
+        return background_tasks
+
+    # def create_handle_loop(self):
+    #     self.to_create_loop = False
+    #     loop = asyncio.get_event_loop()
+    #     loop.create_task(self.handle_loop())
+
     async def decoder_loop(self):
         print("in decoder_loop ")
         while True:
@@ -321,18 +343,17 @@ class TokenizerManager:
             output_tokens = recv_obj.output_tokens
 
             # TODO(lmzheng): handle skip_special_tokens per request
-            output_strs = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.tokenizer.batch_decode,
-                                                                         output_tokens, recv_obj.skip_special_tokens[0]
-                                                                         )
+            def batch_decode():
+                return self.tokenizer.batch_decode(output_tokens,
+                                                   skip_special_tokens=recv_obj.skip_special_tokens[0],
+                                                   spaces_between_special_tokens=
+                                                   recv_obj.spaces_between_special_tokens[0])
+
+            output_strs = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, batch_decode)
 
             # Trim stop str
             # TODO(lmzheng): handle the case where multiple stop strs are hit
             for i in range(len(output_strs)):
-                if recv_obj.hit_stop_str[i] is not None:
-                    pos = output_strs[i].find(recv_obj.hit_stop_str[i])
-                    if pos != -1:
-                        output_strs[i] = output_strs[i][:pos]
-
                 if len(output_tokens[i]) > 0:
                     first_token = await asyncio.get_event_loop().run_in_executor(THREAD_POOL,
                                                                                  self.tokenizer.convert_ids_to_tokens,
@@ -344,9 +365,12 @@ class TokenizerManager:
                     if first_token.startswith("▁"):
                         output_strs[i] = " " + output_strs[i]
 
-                output_strs[i] = (
-                        recv_obj.output_and_jump_forward_strs[i] + output_strs[i]
-                )
+                output_strs[i] = recv_obj.prev_output_strs[i] + output_strs[i]
+
+                if recv_obj.hit_stop_str[i] is not None:
+                    pos = output_strs[i].find(recv_obj.hit_stop_str[i])
+                    if pos != -1:
+                        output_strs[i] = output_strs[i][:pos]
 
             # print(f"detokenizer tokenizer_chan put")
             output = BatchStrOut(
@@ -371,7 +395,9 @@ class TokenizerManager:
                 state.event.set()
                 # print(f"tokenizer state.event.set ready done rid: {rid}")
 
-    def convert_logprob_style(self, ret, return_logprob, top_logprobs_num, return_text_in_logprobs):
+    def convert_logprob_style(
+            self, ret, return_logprob, top_logprobs_num, return_text_in_logprobs
+    ):
         if return_logprob:
             ret["meta_info"]["prefill_token_logprobs"] = self.detokenize_logprob_tokens(
                 ret["meta_info"]["prefill_token_logprobs"], return_text_in_logprobs
@@ -380,11 +406,15 @@ class TokenizerManager:
                 ret["meta_info"]["decode_token_logprobs"], return_text_in_logprobs
             )
         if top_logprobs_num > 0:
-            ret["meta_info"]["prefill_top_logprobs"] = self.detokenize_top_logprobs_tokens(
-                ret["meta_info"]["prefill_top_logprobs"], return_text_in_logprobs
+            ret["meta_info"]["prefill_top_logprobs"] = (
+                self.detokenize_top_logprobs_tokens(
+                    ret["meta_info"]["prefill_top_logprobs"], return_text_in_logprobs
+                )
             )
-            ret["meta_info"]["decode_top_logprobs"] = self.detokenize_top_logprobs_tokens(
-                ret["meta_info"]["decode_top_logprobs"], return_text_in_logprobs
+            ret["meta_info"]["decode_top_logprobs"] = (
+                self.detokenize_top_logprobs_tokens(
+                    ret["meta_info"]["decode_top_logprobs"], return_text_in_logprobs
+                )
             )
         return ret
 
@@ -404,3 +434,49 @@ class TokenizerManager:
             if t:
                 top_logprobs[i] = self.detokenize_logprob_tokens(t, decode_to_text)
         return top_logprobs
+
+
+global global_processor
+
+
+def init_global_processor(server_args: ServerArgs):
+    global global_processor
+    transformers.logging.set_verbosity_error()
+    global_processor = get_processor(
+        server_args.tokenizer_path,
+        tokenizer_mode=server_args.tokenizer_mode,
+        trust_remote_code=server_args.trust_remote_code,
+    )
+
+
+def get_pixel_values(
+        image_data, image_aspect_ratio=None, image_grid_pinpoints=None, processor=None
+):
+    try:
+        processor = processor or global_processor
+        image, image_size = load_image(image_data)
+        if image_size != None:
+            image_hash = hash(image_data)
+            pixel_values = processor.image_processor(image)["pixel_values"]
+            for _ in range(len(pixel_values)):
+                pixel_values[_] = pixel_values[_].astype(np.float16)
+            pixel_values = np.stack(pixel_values, axis=0)
+            return pixel_values, image_hash, image_size
+        else:
+            image_hash = hash(image_data)
+            if image_aspect_ratio == "pad":
+                image = expand2square(
+                    image,
+                    tuple(int(x * 255) for x in processor.image_processor.image_mean),
+                )
+                pixel_values = processor.image_processor(image)["pixel_values"][0]
+            elif image_aspect_ratio == "anyres":
+                pixel_values = process_anyres_image(
+                    image, processor.image_processor, image_grid_pinpoints
+                )
+            else:
+                pixel_values = processor.image_processor(image)["pixel_values"][0]
+            pixel_values = pixel_values.astype(np.float16)
+            return pixel_values, image_hash, image.size
+    except Exception:
+        print("Exception in TokenizerManager:\n" + get_exception_traceback())

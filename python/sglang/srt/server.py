@@ -9,7 +9,8 @@ import os
 import sys
 import threading
 import time
-from typing import List, Optional, Union
+from http import HTTPStatus
+from typing import Optional
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -19,23 +20,31 @@ import aiohttp
 import psutil
 import requests
 import uvloop
-from fastapi import Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+from sglang.backend.runtime_endpoint import RuntimeEndpoint
 from sglang.srt.constrained import disable_cache
-from sglang.srt.managers.io_struct import DetokenizeReqInput, GenerateReqInput
-from sglang.srt.managers.router.manager import start_router_process
+from sglang.srt.hf_transformers_utils import get_tokenizer
+from sglang.srt.managers.detokenizer_manager import start_detokenizer_process
+from sglang.srt.managers.io_struct import GenerateReqInput
+from sglang.srt.managers.controller.manager_single import start_controller_process as start_controller_process_single
+from sglang.srt.managers.controller.manager_multi import start_controller_process as start_controller_process_multi
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api_adapter import (
-    v1_completions, v1_chat_completions, load_chat_template_for_openai_api)
-from sglang.srt.server_args import PortArgs, ServerArgs
+    load_chat_template_for_openai_api,
+    v1_chat_completions,
+    v1_completions,
+)
+from sglang.srt.server_args import ModelPortArgs, PortArgs, ServerArgs
 from sglang.srt.utils import (
+    API_KEY_HEADER_NAME,
+    APIKeyValidatorMiddleware,
     allocate_init_ports,
     assert_pkg_version,
     enable_show_time_cost,
-    get_exception_traceback,
-    API_KEY_HEADER_NAME,
-    APIKeyValidatorMiddleware
 )
+from sglang.utils import get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -83,7 +92,7 @@ async def get_server_args():
 
 # @app.get("/flush_cache")
 async def flush_cache():
-    await tokenizer_manager.flush_cache()
+    tokenizer_manager.flush_cache()
     return Response(
         content="Cache flushed.\nPlease check backend logs for more details. "
                 "(When there are running or waiting requests, the operation will not be performed.)\n",
@@ -148,21 +157,32 @@ async def stream_generator(obj: GenerateReqInput):
         yield out
 
 
-# @app.post("/generate")
-async def generate_request(obj: GenerateReqInput):
-    obj.post_init()
-
+async def generate_request(obj: GenerateReqInput, request: Request = None):
     if obj.stream:
 
         async def stream_results():
-            async for out in tokenizer_manager.generate_request(obj):
+            try:
+                async for out in tokenizer_manager.generate_request(obj, request):
+                    yield f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
+            except ValueError as e:
+                out = {"error": {"message": str(e)}}
                 yield f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(stream_results(), media_type="text/event-stream")
+        return StreamingResponse(stream_results(), media_type="text/event-stream",
+                                 background=tokenizer_manager.create_abort_task(obj))
+    else:
+        try:
+            ret = await tokenizer_manager.generate_request(obj, request).__anext__()
+            return ret
+        except ValueError as e:
+            return JSONResponse(
+                {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
+            )
 
-    ret = await tokenizer_manager.generate_request(obj).__anext__()
-    return ret
+
+# app.post("/generate")(generate_request)
+# app.put("/generate")(generate_request)
 
 
 #@app.post("/v1/completions")
@@ -175,7 +195,7 @@ async def openai_v1_chat_completions(raw_request: Request):
     return await v1_chat_completions(tokenizer_manager, raw_request)
 
 
-def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
+def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None, model_overide_args=None):
     print("launch_server started.... ")
     global tokenizer_manager
 
@@ -198,14 +218,28 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
 
     # Allocate ports
     server_args.port, server_args.additional_ports = allocate_init_ports(
-        server_args.port, server_args.additional_ports, server_args.tp_size
+        server_args.port,
+        server_args.additional_ports,
+        server_args.tp_size,
+        server_args.dp_size,
     )
+
+    # Init local models port args
+    ports = server_args.additional_ports
+    tp = server_args.tp_size
+    model_port_args = []
+    for i in range(server_args.dp_size):
+        model_port_args.append(
+            ModelPortArgs(
+                nccl_port=ports[3 + i * (tp + 1)],
+                model_tp_ports=ports[3 + i * (tp + 1) + 1 : 3 + (i + 1) * (tp + 1)],
+            )
+        )
     port_args = PortArgs(
-        tokenizer_port=server_args.additional_ports[0],
-        router_port=server_args.additional_ports[1],
-        detokenizer_port=server_args.additional_ports[2],
-        nccl_port=server_args.additional_ports[3],
-        model_rpc_ports=server_args.additional_ports[4:],
+        tokenizer_port=ports[0],
+        router_port=ports[1],
+        detokenizer_port=ports[2],
+        model_port_args=model_port_args,
     )
     router_chan = mp.Queue()
     detokenizer_chan = mp.Queue()
@@ -214,12 +248,15 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
 
 
     # Launch processes
-    tokenizer_manager = TokenizerManager(server_args, router_chan, detokenizer_chan, idle_chan)
+    tokenizer_manager = TokenizerManager(server_args, router_chan, detokenizer_chan, idle_chan, model_overide_args)
 
     tokenizer_init_chan.put_nowait("init ok")
 
+    if server_args.dp_size == 1:
+        start_process = start_controller_process_single
+    else:
+        start_process = start_controller_process_multi
     proc_router = mp.Process(
-        target=start_router_process,
         args=(
             server_args,
             port_args,
@@ -227,7 +264,9 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
             detokenizer_chan,
             idle_chan,
             startup_chan,
+            model_overide_args
         ),
+        target=start_process,
     )
     proc_router.start()
 
@@ -236,7 +275,9 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
 
     if router_init_state != "init ok":
         proc_router.kill()
-        print(f"Initialization failed. router_init_state: {router_init_state}", flush=True)
+        print(
+            f"Initialization failed. router_init_state: {router_init_state}", flush=True
+        )
         sys.exit(1)
 
     assert proc_router.is_alive()
@@ -254,6 +295,7 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
     #         loop="uvloop",
     #     )
 
+    # Send a warmup request
     def _wait_and_warmup():
         headers = {}
         url = server_args.url()
@@ -274,14 +316,14 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
             res = requests.post(
                 url + "/generate",
                 json={
-                    "text": "Say this is a warmup request.",
+                    "text": "The capital city of France is",
                     "sampling_params": {
                         "temperature": 0,
                         "max_new_tokens": 16,
                     },
                 },
                 headers=headers,
-                timeout=60,
+                timeout=600,
             )
             assert res.status_code == 200
         except Exception as e:
@@ -295,6 +337,8 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
 
     # t = threading.Thread(target=_wait_and_warmup)
     # t.start()
+    #
+    # # Listen for requests
     # try:
     #     uvicorn.run(
     #         app,
@@ -310,18 +354,23 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
 
 class Runtime:
     def __init__(
-            self,
-            tokenizer_init_chan: mp.Queue,
-            log_evel="error",
-            *args,
-            **kwargs,
+        self,
+        tokenizer_init_chan: mp.Queue,
+        log_level: str = "error",
+        model_overide_args: Optional[dict] = None,
+        *args,
+        **kwargs,
     ):
         """See the arguments in server_args.py::ServerArgs"""
-        self.server_args = ServerArgs(*args, log_level=log_evel, **kwargs)
+        self.server_args = ServerArgs(*args, log_level=log_level, **kwargs)
 
         # Pre-allocate ports
         self.server_args.port, self.server_args.additional_ports = allocate_init_ports(
-            self.server_args.port, self.server_args.additional_ports, self.server_args.tp_size)
+            self.server_args.port,
+            self.server_args.additional_ports,
+            self.server_args.tp_size,
+            self.server_args.dp_size,
+        )
 
         self.url = self.server_args.url()
         self.generate_url = (
@@ -330,14 +379,17 @@ class Runtime:
 
         # self.pid = None
         # pipe_reader, pipe_writer = mp.Pipe(duplex=False)
-        # print("Runtime launch_server...")
-        # proc = mp.Process(target=launch_server, args=(self.server_args, pipe_writer))
+        # proc = mp.Process(
+        #     target=launch_server,
+        #     args=(self.server_args, pipe_writer, model_overide_args),
+        # )
         # proc.start()
         # pipe_writer.close()
         # self.pid = proc.pid
+
         self.pid = os.getpid()
 
-        threading.Thread(target=launch_server, args=[self.server_args, tokenizer_init_chan, None], daemon=True).start()
+        threading.Thread(target=launch_server, args=[self.server_args, tokenizer_init_chan, None, model_overide_args], daemon=True).start()
 
         # try:
         #     init_state = pipe_reader.recv()
@@ -346,9 +398,9 @@ class Runtime:
 
         # if init_state != "init ok":
         #     self.shutdown()
-        #     raise RuntimeError("Initialization failed. Please see the error messages above.")
-        #
-        # self.endpoint = RuntimeEndpoint(self.url)
+        #     raise RuntimeError(
+        #         "Initialization failed. Please see the error messages above."
+        #     )
 
     def shutdown(self):
         if self.pid is not None:

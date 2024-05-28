@@ -1,9 +1,18 @@
 """pydantic models for OpenAI API protocol"""
+
 import time
 from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 from typing_extensions import Literal
+
+
+class ErrorResponse(BaseModel):
+    object: str = "error"
+    message: str
+    type: str
+    param: Optional[str] = None
+    code: int
 
 
 class LogProbs(BaseModel):

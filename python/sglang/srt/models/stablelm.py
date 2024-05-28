@@ -1,41 +1,37 @@
-# This code is based on:
-# https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/stablelm.py
+# Adapted from:
+# https://github.com/vllm-project/vllm/blob/c7f2cf2b7f67bce5842fedfdba508440fe257375/vllm/model_executor/models/stablelm.py#L1
 """Inference-only StableLM-2 (https://huggingface.co/stabilityai/stablelm-2-1_6b)
 model compatible with HuggingFace weights."""
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Iterable
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-)
-from sglang.srt.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.managers.router.model_runner import InputMetadata
+from sglang.srt.managers.controller.model_runner import InputMetadata
 
 
 class StablelmMLP(nn.Module):
     def __init__(
-        self, config: PretrainedConfig, quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -48,7 +44,10 @@ class StablelmMLP(nn.Module):
             quant_config=quant_config,
         )
         self.down_proj = RowParallelLinear(
-            config.intermediate_size, config.hidden_size, bias=False, quant_config=quant_config,
+            config.intermediate_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
         )
         self.act_fn = SiluAndMul()
 
@@ -181,7 +180,9 @@ class StablelmDecoderLayer(nn.Module):
 
 class StableLMEpochModel(nn.Module):
     def __init__(
-        self, config: PretrainedConfig, quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(
@@ -244,13 +245,7 @@ class StableLmForCausalLM(nn.Module):
             input_ids, hidden_states, self.lm_head.weight, input_metadata
         )
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
-    ):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -260,9 +255,7 @@ class StableLmForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:

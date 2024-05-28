@@ -18,38 +18,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Adapted from
+# https://github.com/vllm-project/vllm/blob/c7f2cf2b7f67bce5842fedfdba508440fe257375/vllm/model_executor/models/commandr.py#L1
+
 # This file is based on the LLama model definition file in transformers
 """PyTorch Cohere model."""
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Iterable
 
 import torch
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn.parameter import Parameter
 from transformers import PretrainedConfig
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.model_executor.utils import set_weight_attrs
-from sglang.srt.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.managers.router.model_runner import InputMetadata
+from sglang.srt.managers.controller.model_runner import InputMetadata
 
 
 @torch.compile
@@ -328,13 +327,7 @@ class CohereForCausalLM(nn.Module):
             input_ids, hidden_states, self.model.embed_tokens.weight, input_metadata
         )
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
-    ):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -345,9 +338,7 @@ class CohereForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params = set()
-        for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+        for name, loaded_weight in weights:
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue

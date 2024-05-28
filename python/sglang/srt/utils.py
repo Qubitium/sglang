@@ -1,20 +1,21 @@
 """Common utilities."""
 
 import base64
+import multiprocessing
+import logging
 import os
 import random
 import socket
-import sys
 import time
-import traceback
 from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
 from typing import List, Optional
 
 import numpy as np
-import pydantic
 import requests
+import rpyc
 import torch
+
 import torch.distributed as dist
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -23,11 +24,17 @@ from typing import (
     Callable,
     TypeVar,
 )
+
+import triton
+from rpyc.utils.server import ThreadedServer
 from fastapi.responses import JSONResponse
 from packaging import version as pkg_version
-from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 import asyncio
+
+
+logger = logging.getLogger(__name__)
+
 
 show_time_cost = False
 time_infos = {}
@@ -99,81 +106,86 @@ def calculate_time(show=False, min_cost_ms=0.0):
     return wrapper
 
 
-def set_random_seed(seed: int) -> None:
-    random.seed(seed)
+def get_available_gpu_memory(gpu_id, distributed=False):
+    """
+    Get available memory for cuda:gpu_id device.
+    When distributed is True, the available memory is the minimum available memory of all GPUs.
+    """
+    num_gpus = torch.cuda.device_count()
+    assert gpu_id < num_gpus
 
+    if torch.cuda.current_device() != gpu_id:
+        print(
+            f"WARNING: current device is not {gpu_id}, but {torch.cuda.current_device()}, ",
+            "which may cause useless memory allocation for torch CUDA context.",
+        )
+
+    torch.cuda.empty_cache()
+    free_gpu_memory, _ = torch.cuda.mem_get_info(gpu_id)
+
+    if distributed:
+        tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(
+            torch.device("cuda", gpu_id)
+        )
+        torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.MIN)
+        free_gpu_memory = tensor.item()
+
+    return free_gpu_memory / (1 << 30)
+
+
+def set_random_seed(seed: int) -> None:
+    """Set the random seed for all libraries."""
+    random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
-def alloc_usable_network_port(num, used_list=()):
-    port_list = []
-    for port in range(10000, 65536):
-        if port in used_list:
-            continue
-
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("", port))
-                port_list.append(port)
-            except socket.error:
-                pass
-
-            if len(port_list) == num:
-                return port_list
-    return None
-
-
-def check_port(port):
+def is_port_available(port):
+    """Return whether a port is available."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("", port))
+            s.listen(1)
             return True
         except socket.error:
             return False
 
 
 def allocate_init_ports(
-        port: Optional[int] = None,
-        additional_ports: Optional[List[int]] = None,
-        tp_size: int = 1,
+    port: Optional[int] = None,
+    additional_ports: Optional[List[int]] = None,
+    tp_size: int = 1,
+    dp_size: int = 1,
 ):
-    port = 30000 if port is None else port
-    additional_ports = [] if additional_ports is None else additional_ports
-    additional_ports = (
-        [additional_ports] if isinstance(additional_ports, int) else additional_ports
-    )
-    # first check on server port
-    if not check_port(port):
-        new_port = alloc_usable_network_port(1, used_list=[port])[0]
-        print(f"WARNING: Port {port} is not available. Use {new_port} instead.")
-        port = new_port
+    """Allocate ports for all connections."""
+    if additional_ports:
+        ret_ports = [port] + additional_ports
+    else:
+        ret_ports = [port]
 
-    # then we check on additional ports
-    additional_unique_ports = set(additional_ports) - {port}
-    # filter out ports that are already in use
-    can_use_ports = [port for port in additional_unique_ports if check_port(port)]
+    ret_ports = list(set(x for x in ret_ports if is_port_available(x)))
+    cur_port = ret_ports[-1] + 1 if len(ret_ports) > 0 else 10000
 
-    num_specified_ports = len(can_use_ports)
-    if num_specified_ports < 4 + tp_size:
-        addtional_can_use_ports = alloc_usable_network_port(
-            num=4 + tp_size - num_specified_ports, used_list=can_use_ports + [port]
+    # HTTP + Tokenizer + Controller + Detokenizer + dp_size * (nccl + tp_size)
+    num_ports_needed = 4 + dp_size * (1 + tp_size)
+    while len(ret_ports) < num_ports_needed:
+        if cur_port not in ret_ports and is_port_available(cur_port):
+            ret_ports.append(cur_port)
+        cur_port += 1
+
+    if port is not None and ret_ports[0] != port:
+        logger.warn(
+            f"WARNING: Port {port} is not available. Use port {ret_ports[0]} instead."
         )
-        can_use_ports.extend(addtional_can_use_ports)
 
-    additional_ports = can_use_ports[: 4 + tp_size]
-    return port, additional_ports
-
-
-def get_exception_traceback():
-    etype, value, tb = sys.exc_info()
-    err_str = "".join(traceback.format_exception(etype, value, tb))
-    return err_str
+    return ret_ports[0], ret_ports[1:num_ports_needed]
 
 
 def get_int_token_logit_bias(tokenizer, vocab_size):
+    """Get the logit bias for integer-only tokens."""
     # a bug when model's vocab size > tokenizer.vocab_size
     vocab_size = tokenizer.vocab_size
     logit_bias = np.zeros(vocab_size, dtype=np.float32)
@@ -187,14 +199,11 @@ def get_int_token_logit_bias(tokenizer, vocab_size):
 
 def wrap_kernel_launcher(kernel):
     """A faster launcher for triton kernels."""
-    import torch.distributed as dist
+    if int(triton.__version__.split(".")[0]) >= 3:
+        return None
 
-    if dist.is_initialized():
-        rank = dist.get_rank()
-    else:
-        rank = 0
-
-    kernels = kernel.cache[rank].values()
+    gpu_id = torch.cuda.current_device()
+    kernels = kernel.cache[gpu_id].values()
     kernel = next(iter(kernels))
 
     # Different trition versions use different low-level names
@@ -254,20 +263,104 @@ def wrap_kernel_launcher(kernel):
 
 
 def is_multimodal_model(model):
-    if isinstance(model, str):
-        return "llava" in model or "yi-vl" in model
     from sglang.srt.model_config import ModelConfig
+
+    if isinstance(model, str):
+        model = model.lower()
+        return "llava" in model or "yi-vl" in model or "llava-next" in model
 
     if isinstance(model, ModelConfig):
         model_path = model.path.lower()
-        return "llava" in model_path or "yi-vl" in model_path
-    raise Exception("unrecognized type")
+        return (
+            "llava" in model_path or "yi-vl" in model_path or "llava-next" in model_path
+        )
+
+    raise ValueError("unrecognized type")
+
+
+def decode_video_base64(video_base64):
+    from PIL import Image
+
+    # Decode the base64 string
+    video_bytes = base64.b64decode(video_base64)
+
+    # Placeholder for the start indices of each PNG image
+    img_starts = []
+
+    frame_format = "PNG"  # str(os.getenv('FRAME_FORMAT', "JPEG"))
+
+    assert frame_format in [
+        "PNG",
+        "JPEG",
+    ], "FRAME_FORMAT must be either 'PNG' or 'JPEG'"
+
+    if frame_format == "PNG":
+        # Find each PNG start signature to isolate images
+        i = 0
+        while i < len(video_bytes) - 7:  # Adjusted for the length of the PNG signature
+            # Check if we found the start of a PNG file
+            if (
+                video_bytes[i] == 0x89
+                and video_bytes[i + 1] == 0x50
+                and video_bytes[i + 2] == 0x4E
+                and video_bytes[i + 3] == 0x47
+                and video_bytes[i + 4] == 0x0D
+                and video_bytes[i + 5] == 0x0A
+                and video_bytes[i + 6] == 0x1A
+                and video_bytes[i + 7] == 0x0A
+            ):
+                img_starts.append(i)
+                i += 8  # Skip the PNG signature
+            else:
+                i += 1
+    else:
+        # Find each JPEG start (0xFFD8) to isolate images
+        i = 0
+        while (
+            i < len(video_bytes) - 1
+        ):  # Adjusted for the length of the JPEG SOI signature
+            # Check if we found the start of a JPEG file
+            if video_bytes[i] == 0xFF and video_bytes[i + 1] == 0xD8:
+                img_starts.append(i)
+                # Move to the next byte to continue searching for the next image start
+                i += 2
+            else:
+                i += 1
+
+    frames = []
+    for start_idx in img_starts:
+        # Assuming each image is back-to-back, the end of one image is the start of another
+        # The last image goes until the end of the byte string
+        end_idx = (
+            img_starts[img_starts.index(start_idx) + 1]
+            if img_starts.index(start_idx) + 1 < len(img_starts)
+            else len(video_bytes)
+        )
+        img_bytes = video_bytes[start_idx:end_idx]
+
+        # Convert bytes to a PIL Image
+        img = Image.open(BytesIO(img_bytes))
+
+        # Convert PIL Image to a NumPy array
+        frame = np.array(img)
+
+        # Append the frame to the list of frames
+        frames.append(frame)
+
+    # Ensure there's at least one frame to avoid errors with np.stack
+    if frames:
+        return np.stack(frames, axis=0), img.size
+    else:
+        return np.array([]), (
+            0,
+            0,
+        )  # Return an empty array and size tuple if no frames were found
 
 
 def load_image(image_file):
     from PIL import Image
 
-    image = None
+    image = image_size = None
 
     if image_file.startswith("http://") or image_file.startswith("https://"):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
@@ -278,10 +371,70 @@ def load_image(image_file):
     elif image_file.startswith("data:"):
         image_file = image_file.split(",")[1]
         image = Image.open(BytesIO(base64.b64decode(image_file)))
+    elif image_file.startswith("video:"):
+        image_file = image_file.replace("video:", "")
+        image, image_size = decode_video_base64(image_file)
     else:
         image = Image.open(BytesIO(base64.b64decode(image_file)))
 
-    return image
+    return image, image_size
+
+
+def init_rpyc_service(service: rpyc.Service, port: int):
+    t = ThreadedServer(
+        service=service,
+        port=port,
+        protocol_config={
+            "allow_public_attrs": True,
+            "allow_pickle": True,
+            "sync_request_timeout": 3600
+        },
+    )
+    t.logger.setLevel(logging.WARN)
+    t.start()
+
+
+def connect_to_rpyc_service(port, host="localhost"):
+    time.sleep(1)
+
+    repeat_count = 0
+    while repeat_count < 20:
+        try:
+            con = rpyc.connect(
+                host,
+                port,
+                config={
+                    "allow_public_attrs": True,
+                    "allow_pickle": True,
+                    "sync_request_timeout": 3600
+                },
+            )
+            break
+        except ConnectionRefusedError:
+            time.sleep(1)
+        repeat_count += 1
+    if repeat_count == 20:
+        raise RuntimeError("init rpc env error!")
+
+    return con.root
+
+
+def start_rpyc_process(service: rpyc.Service, port: int):
+    # Return the proxy and the process
+    proc = multiprocessing.Process(target=init_rpyc_service, args=(service, port))
+    proc.start()
+    proxy = connect_to_rpyc_service(port)
+    assert proc.is_alive()
+    return proxy, proc
+
+
+def suppress_other_loggers():
+    from vllm.logger import logger as vllm_default_logger
+
+    vllm_default_logger.setLevel(logging.WARN)
+    logging.getLogger("vllm.utils").setLevel(logging.WARN)
+    logging.getLogger("vllm.selector").setLevel(logging.WARN)
+    logging.getLogger("vllm.config").setLevel(logging.ERROR)
 
 
 T = TypeVar("T")
@@ -335,7 +488,9 @@ def assert_pkg_version(pkg: str, min_version: str):
                 f"is less than the minimum required version {min_version}"
             )
     except PackageNotFoundError:
-        raise Exception(f"{pkg} with minimum required version {min_version} is not installed")
+        raise Exception(
+            f"{pkg} with minimum required version {min_version} is not installed"
+        )
 
 
 API_KEY_HEADER_NAME = "X-API-Key"
@@ -357,12 +512,3 @@ class APIKeyValidatorMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         return response
 
-
-# FIXME: Remove this once we drop support for pydantic 1.x
-IS_PYDANTIC_1 = int(pydantic.VERSION.split(".")[0]) == 1
-
-
-def jsonify_pydantic_model(obj: BaseModel):
-    if IS_PYDANTIC_1:
-        return obj.json(ensure_ascii=False)
-    return obj.model_dump_json()

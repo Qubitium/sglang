@@ -1,12 +1,19 @@
+"""A controller that manages a group of tensor parallel workers."""
 import asyncio
 import logging
 import multiprocessing as mp
 import os
 import queue
 import psutil
-from sglang.srt.managers.router.model import ModelClient
+
+import uvloop
+import zmq
+import zmq.asyncio
+
+from sglang.global_config import global_config
+from sglang.srt.managers.controller.tp_worker import ModelTpClient
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils import get_exception_traceback
+from sglang.utils import get_exception_traceback
 
 def flush_queue(q: mp.Queue):
     while True:
@@ -15,13 +22,17 @@ def flush_queue(q: mp.Queue):
         except queue.Empty:
             break
 
-class RouterManager:
-    def __init__(self, model_client: ModelClient, router_chan: mp.Queue, detokenzier_chan: mp.Queue, idle_chan: mp.Queue):
+class ControllerSingle:
+    def __init__(self, model_client: ModelTpClient, router_chan: mp.Queue, detokenzier_chan: mp.Queue,
+                 idle_chan: mp.Queue):
         # Init status
         self.model_client = model_client
         self.router_chan = router_chan
         self.detokenizer_chan = detokenzier_chan
         self.idle_chan = idle_chan
+
+        # Init some configs
+        self.request_dependency_delay = global_config.request_dependency_delay
 
     async def loop_for_forward(self):
         idle = True
@@ -32,7 +43,6 @@ class RouterManager:
                     # print("forward GOT IDLE signal")
                     flush_queue(self.idle_chan)
                     idle = True
-
 
             next_step_input = []
 
@@ -46,7 +56,7 @@ class RouterManager:
                 # print("CPU SPIN LOOP")
 
             # if not idle, model is doing work, disable wait and set to 0ms
-            wait_timeout = 0.010 if len(next_step_input) == 1 else 0.0
+            wait_timeout = global_config.request_dependency_delay if len(next_step_input) == 1 else 0.0
             while True:
                 try:
                     if wait_timeout == 0.0:
@@ -67,13 +77,14 @@ class RouterManager:
                 self.detokenizer_chan.put_nowait(item)
 
 
-def start_router_process(
+def start_controller_process(
     server_args: ServerArgs,
     port_args: PortArgs,
     router_chan: mp.Queue,
     detokenizer_chan: mp.Queue,
     idle_chan: mp.Queue,
     startup_chan: mp.Queue,
+    model_overide_args,
 ):
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
@@ -81,8 +92,13 @@ def start_router_process(
     )
 
     try:
-        model_client = ModelClient(server_args, port_args)
-        router = RouterManager(model_client, router_chan, detokenizer_chan, idle_chan)
+        model_client = ModelTpClient(
+            list(range(server_args.tp_size)),
+            server_args,
+            port_args.model_port_args[0],
+            model_overide_args,
+        )
+        controller = ControllerSingle(model_client, router_chan, detokenizer_chan, idle_chan)
     except Exception:
         startup_chan.put_nowait(get_exception_traceback())
         raise
@@ -93,7 +109,7 @@ def start_router_process(
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(router.loop_for_forward())
+        loop.run_until_complete(controller.loop_for_forward())
     except KeyboardInterrupt:
         print("Caught KeyboardInterrupt, terminating sglang process")
         try:
