@@ -24,8 +24,8 @@ class FinishReason(IntEnum):
 
 # Referring to RepetitionPenaltyLogitsProcessor.
 # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py#L338
-def apply_repetition_penalty(penalty, input_ids: torch.Tensor,
-                             scores: torch.Tensor, dim=1) -> torch.Tensor:
+def apply_repetition_penalty(penalty: torch.Tensor, input_ids: List[int],
+                             scores: torch.Tensor, dim: int = 1) -> torch.Tensor:
     input_ids = torch.tensor(input_ids, device=scores.device)
     score = torch.gather(scores, dim, input_ids)
 
