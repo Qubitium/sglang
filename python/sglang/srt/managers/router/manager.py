@@ -6,7 +6,7 @@ import queue
 import psutil
 from sglang.srt.managers.router.model import ModelClient
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils import get_exception_traceback
+from sglang.utils import get_exception_traceback
 
 def flush_queue(q: mp.Queue):
     while True:
@@ -74,6 +74,7 @@ def start_router_process(
     detokenizer_chan: mp.Queue,
     idle_chan: mp.Queue,
     startup_chan: mp.Queue,
+    model_overide_args,
 ):
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
@@ -81,7 +82,7 @@ def start_router_process(
     )
 
     try:
-        model_client = ModelClient(server_args, port_args)
+        model_client = ModelClient(server_args, port_args, model_overide_args)
         router = RouterManager(model_client, router_chan, detokenizer_chan, idle_chan)
     except Exception:
         startup_chan.put_nowait(get_exception_traceback())

@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+from http import HTTPStatus
 from typing import List, Optional, Union
 
 # Fix a bug of Python threading
@@ -19,23 +20,28 @@ import aiohttp
 import psutil
 import requests
 import uvloop
-from fastapi import Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+from sglang.backend.runtime_endpoint import RuntimeEndpoint
 from sglang.srt.constrained import disable_cache
 from sglang.srt.managers.io_struct import DetokenizeReqInput, GenerateReqInput
 from sglang.srt.managers.router.manager import start_router_process
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api_adapter import (
-    v1_completions, v1_chat_completions, load_chat_template_for_openai_api)
+    load_chat_template_for_openai_api,
+    v1_chat_completions,
+    v1_completions,
+)
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
+    API_KEY_HEADER_NAME,
+    APIKeyValidatorMiddleware,
     allocate_init_ports,
     assert_pkg_version,
     enable_show_time_cost,
-    get_exception_traceback,
-    API_KEY_HEADER_NAME,
-    APIKeyValidatorMiddleware
 )
+from sglang.utils import get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -83,7 +89,7 @@ async def get_server_args():
 
 # @app.get("/flush_cache")
 async def flush_cache():
-    await tokenizer_manager.flush_cache()
+    tokenizer_manager.flush_cache()
     return Response(
         content="Cache flushed.\nPlease check backend logs for more details. "
                 "(When there are running or waiting requests, the operation will not be performed.)\n",
@@ -91,79 +97,28 @@ async def flush_cache():
     )
 
 
-async def detokenize_logprob_tokens(token_logprobs, decode_to_text):
-    if not decode_to_text:
-        return [(logprob, token_id, None) for logprob, token_id in token_logprobs]
-
-    token_ids = [tid for _, tid in token_logprobs]
-    token_texts = await tokenizer_manager.detokenize(DetokenizeReqInput(token_ids))
-    return [
-        (logprob, token_id, token_text)
-        for (logprob, token_id), token_text, in zip(token_logprobs, token_texts)
-    ]
-
-
-async def detokenize_top_logprobs_tokens(top_logprobs, decode_to_text):
-    for i, t in enumerate(top_logprobs):
-        if top_logprobs[i] is not None:
-            top_logprobs[i] = await detokenize_logprob_tokens(t, decode_to_text)
-    return top_logprobs
-
-
-async def handle_token_logprobs_results(obj: GenerateReqInput, ret):
-    """Handle the token logprobs results, convert token ids to text if needed.
-
-    Args:
-        obj (GenerateReqInput): The request object.
-        ret (Union[Dict, List[Dict]]): The response object.
-    """
-    # NOTE: This is because the multiple requests in one http request.
-
-    async def convert_style(r, return_text):
-        r["meta_info"]["prefill_token_logprobs"] = await detokenize_logprob_tokens(
-            r["meta_info"]["prefill_token_logprobs"], return_text
-        )
-        r["meta_info"]["decode_token_logprobs"] = await detokenize_logprob_tokens(
-            r["meta_info"]["decode_token_logprobs"], return_text
-        )
-        r["meta_info"]["prefill_top_logprobs"] = await detokenize_top_logprobs_tokens(
-            r["meta_info"]["prefill_top_logprobs"], return_text
-        )
-        r["meta_info"]["decode_top_logprobs"] = await detokenize_top_logprobs_tokens(
-            r["meta_info"]["decode_top_logprobs"], return_text
-        )
-
-    if isinstance(obj.text, str):
-        if obj.return_logprob:
-            await convert_style(ret, obj.return_text_in_logprobs)
-    else:
-        for i, r in enumerate(ret):
-            if obj.return_logprob[i]:
-                await convert_style(r, obj.return_text_in_logprobs)
-
-
-async def stream_generator(obj: GenerateReqInput):
-    async for out in tokenizer_manager.generate_request(obj):
-        await handle_token_logprobs_results(obj, out)
-        yield out
-
-
-# @app.post("/generate")
 async def generate_request(obj: GenerateReqInput):
-    obj.post_init()
-
     if obj.stream:
 
         async def stream_results():
-            async for out in tokenizer_manager.generate_request(obj):
+            try:
+                async for out in tokenizer_manager.generate_request(obj):
+                    yield f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
+            except ValueError as e:
+                out = {"error": {"message": str(e)}}
                 yield f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(stream_results(), media_type="text/event-stream")
-
-    ret = await tokenizer_manager.generate_request(obj).__anext__()
-    return ret
-
+        return StreamingResponse(stream_results(), media_type="text/event-stream",
+                                 background=tokenizer_manager.create_abort_task(obj))
+    else:
+        try:
+            ret = await tokenizer_manager.generate_request(obj).__anext__()
+            return ret
+        except ValueError as e:
+            return JSONResponse(
+                {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
+            )
 
 #@app.post("/v1/completions")
 async def openai_v1_completions(raw_request: Request):
@@ -175,7 +130,7 @@ async def openai_v1_chat_completions(raw_request: Request):
     return await v1_chat_completions(tokenizer_manager, raw_request)
 
 
-def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
+def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None, model_overide_args=None):
     print("launch_server started.... ")
     global tokenizer_manager
 
@@ -227,6 +182,7 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
             detokenizer_chan,
             idle_chan,
             startup_chan,
+            model_overide_args,
         ),
     )
     proc_router.start()
@@ -254,6 +210,7 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
     #         loop="uvloop",
     #     )
 
+    # Send a warmup request
     def _wait_and_warmup():
         headers = {}
         url = server_args.url()
@@ -274,14 +231,14 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None):
             res = requests.post(
                 url + "/generate",
                 json={
-                    "text": "Say this is a warmup request.",
+                    "text": "The capital city of France is",
                     "sampling_params": {
                         "temperature": 0,
                         "max_new_tokens": 16,
                     },
                 },
                 headers=headers,
-                timeout=60,
+                timeout=600,
             )
             assert res.status_code == 200
         except Exception as e:
@@ -313,6 +270,7 @@ class Runtime:
             self,
             tokenizer_init_chan: mp.Queue,
             log_evel="error",
+            model_overide_args: Optional[dict] = None,
             *args,
             **kwargs,
     ):
@@ -321,7 +279,10 @@ class Runtime:
 
         # Pre-allocate ports
         self.server_args.port, self.server_args.additional_ports = allocate_init_ports(
-            self.server_args.port, self.server_args.additional_ports, self.server_args.tp_size)
+            self.server_args.port,
+            self.server_args.additional_ports,
+            self.server_args.tp_size,
+        )
 
         self.url = self.server_args.url()
         self.generate_url = (

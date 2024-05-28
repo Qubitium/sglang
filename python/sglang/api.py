@@ -15,17 +15,18 @@ from sglang.lang.ir import (
     SglRoleBegin,
     SglRoleEnd,
     SglSelect,
+    SglVideo,
 )
 
 
 def function(
-    func: Optional[Callable] = None, api_num_spec_tokens: Optional[int] = None
+    func: Optional[Callable] = None, num_api_spec_tokens: Optional[int] = None
 ):
     if func:
-        return SglFunction(func, api_num_spec_tokens=api_num_spec_tokens)
+        return SglFunction(func, num_api_spec_tokens=num_api_spec_tokens)
 
     def decorator(func):
-        return SglFunction(func, api_num_spec_tokens=api_num_spec_tokens)
+        return SglFunction(func, num_api_spec_tokens=num_api_spec_tokens)
 
     return decorator
 
@@ -155,6 +156,10 @@ def gen_string(
 
 def image(expr: SglExpr):
     return SglImage(expr)
+
+
+def video(path: str, num_frames: int):
+    return SglVideo(path, num_frames)
 
 
 def select(

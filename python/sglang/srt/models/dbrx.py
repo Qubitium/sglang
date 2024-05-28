@@ -1,41 +1,35 @@
 # Adapted from:
-# https://github.com/vllm-project/vllm/blob/14ccd94c89d0ffd9da283545d93ab1dfea5da340/vllm/model_executor/models/dbrx.py
+# https://github.com/vllm-project/vllm/blob/c7f2cf2b7f67bce5842fedfdba508440fe257375/vllm/model_executor/models/dbrx.py#L1
 # coding=utf-8
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.distributed import (
-    tensor_model_parallel_all_reduce,
-)
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.model_executor.utils import set_weight_attrs
-from sglang.srt.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.managers.router.model_runner import InputMetadata
-from sglang.srt.models.dbrx_config import DbrxConfig
 
 
 class DbrxRouter(nn.Module):
@@ -291,7 +285,9 @@ class DbrxBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.norm_attn_norm = DbrxFusedNormAttention(config, layer_id, quant_config=quant_config)
+        self.norm_attn_norm = DbrxFusedNormAttention(
+            config, layer_id, quant_config=quant_config
+        )
         self.ffn = DbrxExperts(config, quant_config=quant_config)
 
     def forward(
@@ -322,7 +318,10 @@ class DbrxModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList(
-            [DbrxBlock(config, i, quant_config=quant_config) for i in range(config.n_layers)]
+            [
+                DbrxBlock(config, i, quant_config=quant_config)
+                for i in range(config.n_layers)
+            ]
         )
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
         for module in self.modules():
@@ -378,13 +377,7 @@ class DbrxForCausalLM(nn.Module):
             input_ids, hidden_states, self.lm_head.weight, input_metadata
         )
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
-    ):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         expert_params_mapping = [
             (
                 "ws" if weight_name in ["w1", "v1"] else "w2s",
@@ -393,9 +386,7 @@ class DbrxForCausalLM(nn.Module):
             for weight_name in ["w1", "v1", "w2"]
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+        for name, loaded_weight in weights:
             for param_name, weight_name in expert_params_mapping:
                 if weight_name not in name:
                     continue

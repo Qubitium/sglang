@@ -15,16 +15,17 @@ from sglang.srt.hf_transformers_utils import (
     get_tokenizer,
 )
 from sglang.srt.managers.io_struct import (
-    BatchStrOut,
     DetokenizeReqInput,
+    BatchStrOut,
     FlushCacheReq,
     GenerateReqInput,
     TokenizedGenerateReqInput,
 )
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling_params import SamplingParams
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_image
+from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.utils import is_multimodal_model, load_image
+from sglang.utils import get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -84,6 +85,7 @@ class TokenizerManager:
             router_chan: mp.Queue,
             detokenizer_chan: mp.Queue,
             idle_chan: mp.Queue,
+            model_overide_args: dict = None,
     ):
         # num of pending requests
         self.pending = 0
@@ -95,9 +97,10 @@ class TokenizerManager:
 
         self.model_path = server_args.model_path
         self.hf_config = get_config(
-            self.model_path, trust_remote_code=server_args.trust_remote_code
+            self.model_path,
+            trust_remote_code=server_args.trust_remote_code,
+            model_overide_args=model_overide_args,
         )
-
         self.context_len = get_context_length(self.hf_config)
 
         if is_multimodal_model(self.model_path):
@@ -152,6 +155,7 @@ class TokenizerManager:
     async def generate_request(self, obj: GenerateReqInput):
         await self.start()
 
+        obj.post_init()
         is_single = obj.is_single
         if is_single:
             self.pending += 1
@@ -163,6 +167,12 @@ class TokenizerManager:
                 input_ids = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.tokenizer.encode, obj.text)
             else:
                 input_ids = obj.input_ids
+
+            if len(input_ids) >= self.context_len:
+                raise ValueError(
+                    f"The input ({len(input_ids)} tokens) is longer than the "
+                    f"model's context length ({self.context_len} tokens)."
+                )
 
             sampling_params = SamplingParams(**obj.sampling_params)
             if sampling_params.max_new_tokens != 0:
@@ -283,10 +293,13 @@ class TokenizerManager:
 
                 # print("tokenizer generate request multiple wait for event complete")
                 output_list.append(
-                    self.convert_logprob_style(state.out_list[-1],
-                                               obj.return_logprob[i],
-                                               obj.top_logprobs_num[i],
-                                               obj.return_text_in_logprobs))
+                    self.convert_logprob_style(
+                        state.out_list[-1],
+                        obj.return_logprob[i],
+                        obj.top_logprobs_num[i],
+                        obj.return_text_in_logprobs,
+                    )
+                )
                 assert state.finished
 
                 del self.rid_to_state[rid]
@@ -371,7 +384,9 @@ class TokenizerManager:
                 state.event.set()
                 # print(f"tokenizer state.event.set ready done rid: {rid}")
 
-    def convert_logprob_style(self, ret, return_logprob, top_logprobs_num, return_text_in_logprobs):
+    def convert_logprob_style(
+        self, ret, return_logprob, top_logprobs_num, return_text_in_logprobs
+    ):
         if return_logprob:
             ret["meta_info"]["prefill_token_logprobs"] = self.detokenize_logprob_tokens(
                 ret["meta_info"]["prefill_token_logprobs"], return_text_in_logprobs
@@ -380,11 +395,15 @@ class TokenizerManager:
                 ret["meta_info"]["decode_token_logprobs"], return_text_in_logprobs
             )
         if top_logprobs_num > 0:
-            ret["meta_info"]["prefill_top_logprobs"] = self.detokenize_top_logprobs_tokens(
-                ret["meta_info"]["prefill_top_logprobs"], return_text_in_logprobs
+            ret["meta_info"]["prefill_top_logprobs"] = (
+                self.detokenize_top_logprobs_tokens(
+                    ret["meta_info"]["prefill_top_logprobs"], return_text_in_logprobs
+                )
             )
-            ret["meta_info"]["decode_top_logprobs"] = self.detokenize_top_logprobs_tokens(
-                ret["meta_info"]["decode_top_logprobs"], return_text_in_logprobs
+            ret["meta_info"]["decode_top_logprobs"] = (
+                self.detokenize_top_logprobs_tokens(
+                    ret["meta_info"]["decode_top_logprobs"], return_text_in_logprobs
+                )
             )
         return ret
 
@@ -404,3 +423,49 @@ class TokenizerManager:
             if t:
                 top_logprobs[i] = self.detokenize_logprob_tokens(t, decode_to_text)
         return top_logprobs
+
+
+global global_processor
+
+
+def init_global_processor(server_args: ServerArgs):
+    global global_processor
+    transformers.logging.set_verbosity_error()
+    global_processor = get_processor(
+        server_args.tokenizer_path,
+        tokenizer_mode=server_args.tokenizer_mode,
+        trust_remote_code=server_args.trust_remote_code,
+    )
+
+
+def get_pixel_values(
+    image_data, image_aspect_ratio=None, image_grid_pinpoints=None, processor=None
+):
+    try:
+        processor = processor or global_processor
+        image, image_size = load_image(image_data)
+        if image_size != None:
+            image_hash = hash(image_data)
+            pixel_values = processor.image_processor(image)["pixel_values"]
+            for _ in range(len(pixel_values)):
+                pixel_values[_] = pixel_values[_].astype(np.float16)
+            pixel_values = np.stack(pixel_values, axis=0)
+            return pixel_values, image_hash, image_size
+        else:
+            image_hash = hash(image_data)
+            if image_aspect_ratio == "pad":
+                image = expand2square(
+                    image,
+                    tuple(int(x * 255) for x in processor.image_processor.image_mean),
+                )
+                pixel_values = processor.image_processor(image)["pixel_values"][0]
+            elif image_aspect_ratio == "anyres":
+                pixel_values = process_anyres_image(
+                    image, processor.image_processor, image_grid_pinpoints
+                )
+            else:
+                pixel_values = processor.image_processor(image)["pixel_values"][0]
+            pixel_values = pixel_values.astype(np.float16)
+            return pixel_values, image_hash, image.size
+    except Exception:
+        print("Exception in TokenizerManager:\n" + get_exception_traceback())

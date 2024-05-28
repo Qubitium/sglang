@@ -4,50 +4,54 @@ import multiprocessing
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Optional
 
 import rpyc
 import torch
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
+
 try:
     from vllm.logger import _default_handler as vllm_default_logger
 except ImportError:
     from vllm.logger import logger as vllm_default_logger
 
+from sglang.global_config import global_config
 from sglang.srt.constrained.fsm_cache import FSMCache
 from sglang.srt.constrained.jump_forward import JumpForwardCache
 from sglang.srt.hf_transformers_utils import get_processor, get_tokenizer
 from sglang.srt.managers.io_struct import (
+    AbortReq,
     BatchTokenIDOut,
     FlushCacheReq,
     TokenizedGenerateReqInput,
 )
-from sglang.srt.managers.router.infer_batch import Batch, ForwardMode, Req
+from sglang.srt.managers.router.infer_batch import Batch, FinishReason, ForwardMode, Req
 from sglang.srt.managers.router.model_runner import ModelRunner
 from sglang.srt.managers.router.radix_cache import RadixCache
 from sglang.srt.managers.router.scheduler import Scheduler
 from sglang.srt.model_config import ModelConfig
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
-    get_exception_traceback,
     get_int_token_logit_bias,
     is_multimodal_model,
     set_random_seed,
 )
-
+from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger("model_rpc")
 vllm_default_logger.setLevel(logging.WARN)
 logging.getLogger("vllm.utils").setLevel(logging.WARN)
+logging.getLogger("vllm.selector").setLevel(logging.WARN)
 
 
 class ModelServer():
     def __init__(
-            self,
-            tp_rank: int,
-            server_args: ServerArgs,
-            port_args: PortArgs,
+        self,
+        tp_rank: int,
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        model_overide_args: Optional[dict] = None,
     ):
         server_args, port_args = [obtain(x) for x in [server_args, port_args]]
 
@@ -62,23 +66,17 @@ class ModelServer():
             server_args.model_path,
             server_args.trust_remote_code,
             context_length=server_args.context_length,
+            model_overide_args=model_overide_args,
         )
 
         # For model end global settings
-        server_args_dict = {
-            "enable_flashinfer": server_args.enable_flashinfer,
-            "attention_reduce_in_fp32": server_args.attention_reduce_in_fp32,
-        }
-
         self.model_runner = ModelRunner(
             model_config=self.model_config,
             mem_fraction_static=server_args.mem_fraction_static,
             tp_rank=tp_rank,
             tp_size=server_args.tp_size,
             nccl_port=port_args.nccl_port,
-            load_format=server_args.load_format,
-            trust_remote_code=server_args.trust_remote_code,
-            server_args_dict=server_args_dict,
+            server_args=server_args,
         )
         if is_multimodal_model(server_args.model_path):
             self.processor = get_processor(
@@ -93,37 +91,44 @@ class ModelServer():
                 tokenizer_mode=server_args.tokenizer_mode,
                 trust_remote_code=server_args.trust_remote_code,
             )
-        self.max_total_num_token = self.model_runner.max_total_num_token
-        self.max_num_running_seq = self.max_total_num_token // 2
-        self.max_prefill_num_token = max(
+        self.max_total_num_tokens = self.model_runner.max_total_num_tokens
+        self.max_prefill_tokens = max(
             self.model_config.context_len,
             (
-                self.max_total_num_token // 6
-                if server_args.max_prefill_num_token is None
-                else server_args.max_prefill_num_token
+                self.max_total_num_tokens // 6
+                if server_args.max_prefill_tokens is None
+                else server_args.max_prefill_tokens
             ),
         )
+        self.max_running_requests = (self.max_total_num_tokens // 2
+            if server_args.max_running_requests is None else server_args.max_running_requests)
+
         self.int_token_logit_bias = torch.tensor(
             get_int_token_logit_bias(self.tokenizer, self.model_config.vocab_size)
         )
         set_random_seed(server_args.random_seed)
-        logger.info(
-            f"Rank {self.tp_rank}: "
-            f"max_total_num_token={self.max_total_num_token}, "
-            f"max_prefill_num_token={self.max_prefill_num_token}, "
+
+        # Print info
+        logger.info(f"[rank={self.tp_rank}] "
+            f"max_total_num_tokens={self.max_total_num_tokens}, "
+            f"max_prefill_tokens={self.max_prefill_tokens}, "
             f"context_len={self.model_config.context_len}, "
         )
         if self.tp_rank == 0:
             logger.info(f"server_args: {server_args.print_mode_args()}")
 
         # Init cache
-        self.tree_cache = RadixCache(disable=server_args.disable_radix_cache)
+        self.tree_cache = RadixCache(
+            req_to_token_pool=self.model_runner.req_to_token_pool,
+            token_to_kv_pool=self.model_runner.token_to_kv_pool,
+            disable=server_args.disable_radix_cache,
+        )
         self.tree_cache_metrics = {"total": 0, "hit": 0}
         self.scheduler = Scheduler(
             self.schedule_heuristic,
-            self.max_num_running_seq,
-            self.max_prefill_num_token,
-            self.max_total_num_token,
+            self.max_running_requests,
+            self.max_prefill_tokens,
+            self.max_total_num_tokens,
             self.tree_cache,
         )
         self.req_to_token_pool = self.model_runner.req_to_token_pool
@@ -135,6 +140,8 @@ class ModelServer():
         self.out_pyobjs = []
         self.decode_forward_ct = 0
         self.stream_interval = server_args.stream_interval
+        self.num_generated_tokens = 0
+        self.last_stats_tic = time.time()
 
         # Init the FSM cache for constrained generation
         self.regex_fsm_cache = FSMCache(
@@ -147,27 +154,20 @@ class ModelServer():
         self.jump_forward_cache = JumpForwardCache()
 
         # Init new token estimation
-        self.new_token_ratio = min(0.4 * server_args.schedule_conservativeness, 1.0)
-        self.min_new_token_ratio = min(0.2 * server_args.schedule_conservativeness, 1.0)
-        self.new_token_ratio_step = (0.0001, 0.05)  # (down, up)
-
-    def flush_cache(self):
-        if len(self.forward_queue) == 0 and (
-            self.running_batch is None or len(self.running_batch.reqs) == 0
-        ):
-            self.tree_cache.reset()
-            self.tree_cache_metrics = {"total": 0, "hit": 0}
-            self.regex_fsm_cache.reset()
-            self.req_to_token_pool.clear()
-            self.token_to_kv_pool.clear()
-            torch.cuda.empty_cache()
-            logger.info("Cache flushed successfully!")
-        else:
-            warnings.warn(
-                f"Cache not flushed because there are pending requests. "
-                f"#queue-req: {len(self.forward_queue)}, "
-                f"#running-req: {0 if self.running_batch is None else len(self.running_batch.reqs)}"
-            )
+        assert (
+            server_args.schedule_conservativeness >= 0
+        ), "Invalid schedule_conservativeness"
+        self.new_token_ratio = min(
+            global_config.base_new_token_ratio * server_args.schedule_conservativeness,
+            1.0,
+        )
+        self.min_new_token_ratio = min(
+            global_config.base_min_new_token_ratio
+            * server_args.schedule_conservativeness,
+            1.0,
+        )
+        self.new_token_ratio_decay = global_config.new_token_ratio_decay
+        self.new_token_ratio_recovery = global_config.new_token_ratio_recovery
 
     def exposed_step(self, recv_reqs):
         if self.tp_size != 1:
@@ -180,6 +180,8 @@ class ModelServer():
                     self.handle_generate_request(recv_req)
                 elif isinstance(recv_req, FlushCacheReq):
                     self.flush_cache()
+                elif isinstance(recv_req, AbortReq):
+                    self.abort_request(recv_req)
                 else:
                     raise ValueError(f"Invalid request: {recv_req}")
 
@@ -198,8 +200,9 @@ class ModelServer():
         new_batch = self.get_new_fill_batch()
 
         if new_batch is not None:
-            # Run new fill batch
+            # Run a new fill batch
             self.forward_fill_batch(new_batch)
+            self.cache_filled_batch(new_batch)
 
             if not new_batch.is_empty():
                 if self.running_batch is None:
@@ -211,7 +214,28 @@ class ModelServer():
             if self.running_batch is not None:
                 # Run a few decode batches continuously for reducing overhead
                 for _ in range(10):
+                    self.num_generated_tokens += len(self.running_batch.reqs)
                     self.forward_decode_batch(self.running_batch)
+
+                    # Print stats
+                    if self.tp_rank == 0:
+                        if self.decode_forward_ct % 40 == 0:
+                            num_used = self.max_total_num_tokens - (
+                                self.token_to_kv_pool.available_size()
+                                + self.tree_cache.evictable_size()
+                            )
+                            throuhgput = self.num_generated_tokens / (
+                                time.time() - self.last_stats_tic
+                            )
+                            self.num_generated_tokens = 0
+                            self.last_stats_tic = time.time()
+                            logger.info(
+                                f"#running-req: {len(self.running_batch.reqs)}, "
+                                f"#token: {num_used}, "
+                                f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
+                                f"gen throughput (token/s): {throuhgput:.2f}, "
+                                f"#queue-req: {len(self.forward_queue)}"
+                            )
 
                     if self.running_batch.is_empty():
                         self.running_batch = None
@@ -219,29 +243,16 @@ class ModelServer():
 
                     if self.out_pyobjs and self.running_batch.reqs[0].stream:
                         break
-
-                    if self.running_batch is not None and self.tp_rank == 0:
-                        if self.decode_forward_ct % 40 == 0:
-                            num_used = self.max_total_num_token - (
-                                self.token_to_kv_pool.available_size()
-                                + self.tree_cache.evictable_size()
-                            )
-                            logger.info(
-                                f"#running-req: {len(self.running_batch.reqs)}, "
-                                f"#token: {num_used}, "
-                                f"token usage: {num_used / self.max_total_num_token:.2f}, "
-                                f"#queue-req: {len(self.forward_queue)}"
-                            )
             else:
-                # check the available size
+                # Check the available size
                 available_size = (
                     self.token_to_kv_pool.available_size()
                     + self.tree_cache.evictable_size()
                 )
-                if available_size != self.max_total_num_token:
+                if available_size != self.max_total_num_tokens:
                     warnings.warn(
                         "Warning: "
-                        f"available_size={available_size}, max_total_num_token={self.max_total_num_token}\n"
+                        f"available_size={available_size}, max_total_num_tokens={self.max_total_num_tokens}\n"
                         "KV cache pool leak detected!"
                     )
 
@@ -259,8 +270,13 @@ class ModelServer():
                 (recv_req.image_hash >> 64) % self.model_config.vocab_size,
             ]
             req.image_size = recv_req.image_size
-            req.input_ids, req.image_offset = self.model_runner.model.pad_input_ids(
-                req.input_ids, req.pad_value, req.pixel_values.shape, req.image_size
+            req.origin_input_ids, req.image_offset = (
+                self.model_runner.model.pad_input_ids(
+                    req.origin_input_ids_unpadded,
+                    req.pad_value,
+                    req.pixel_values.shape,
+                    req.image_size,
+                )
             )
         req.sampling_params = recv_req.sampling_params
         req.return_logprob = recv_req.return_logprob
@@ -277,23 +293,28 @@ class ModelServer():
                     req.sampling_params.regex
                 )
 
-        # Truncate long prompts
-        req.input_ids = req.input_ids[: self.model_config.context_len - 1]
+        # Truncate prompts that are too long
+        req.origin_input_ids = req.origin_input_ids[: self.model_config.context_len - 1]
         req.sampling_params.max_new_tokens = min(
             req.sampling_params.max_new_tokens,
-            self.model_config.context_len - 1 - len(req.input_ids),
-            self.max_total_num_token - 128 - len(req.input_ids),
+            self.model_config.context_len - 1 - len(req.origin_input_ids),
+            self.max_total_num_tokens - 128 - len(req.origin_input_ids),
         )
         self.forward_queue.append(req)
 
     def get_new_fill_batch(self):
         if (
             self.running_batch is not None
-            and len(self.running_batch.reqs) > self.max_num_running_seq
+            and len(self.running_batch.reqs) > self.max_running_requests
         ):
             return None
 
+        # Compute matched prefix length
         for req in self.forward_queue:
+            assert (
+                len(req.output_ids) == 0
+            ), "The output ids should be empty when prefilling"
+            req.input_ids = req.origin_input_ids + req.prev_output_ids
             prefix_indices, last_node = self.tree_cache.match_prefix(req.input_ids)
             if req.return_logprob:
                 prefix_indices = prefix_indices[: req.logprob_start_len]
@@ -321,7 +342,7 @@ class ModelServer():
             )
 
         for req in self.forward_queue:
-            if req.return_logprob:
+            if req.return_logprob and req.normalized_prompt_logprob is None:
                 # Need at least two tokens to compute normalized logprob
                 if req.extend_input_len < 2:
                     delta = 2 - req.extend_input_len
@@ -340,22 +361,21 @@ class ModelServer():
                 req.extend_input_len + req.max_new_tokens() + new_batch_total_tokens
                 < available_size
                 and req.extend_input_len + new_batch_input_tokens
-                < self.max_prefill_num_token
+                < self.max_prefill_tokens
             ):
-                delta = self.tree_cache.inc_ref_counter(req.last_node)
+                delta = self.tree_cache.inc_lock_ref(req.last_node)
                 available_size += delta
 
                 if not (
                     req.extend_input_len + req.max_new_tokens() + new_batch_total_tokens
                     < available_size
                 ):
-                    # Undo the insertion
-                    delta = self.tree_cache.dec_ref_counter(req.last_node)
+                    # Undo locking
+                    delta = self.tree_cache.dec_lock_ref(req.last_node)
                     available_size += delta
                     break
                 else:
                     # Add this request to the running batch
-                    self.token_to_kv_pool.add_refs(req.prefix_indices)
                     can_run_list.append(req)
                     new_batch_total_tokens += (
                         req.extend_input_len + req.max_new_tokens()
@@ -366,6 +386,7 @@ class ModelServer():
         if len(can_run_list) == 0:
             return None
 
+        # Print stats
         if self.tp_rank == 0:
             running_req = (
                 0 if self.running_batch is None else len(self.running_batch.reqs)
@@ -386,13 +407,14 @@ class ModelServer():
                 f"#running_req: {running_req}. "
                 f"tree_cache_hit_rate: {100.0 * tree_cache_hit_rate:.2f}%."
             )
-            #logger.debug(
+            # logger.debug(
             #    f"fsm_cache_hit_rate: {100.0 * self.regex_fsm_cache.get_cache_hit_rate():.2f}%. "
             #    f"fsm_cache_avg_init_time: {self.regex_fsm_cache.get_avg_init_time():.2f}s. "
             #    f"ff_cache_hit_rate: {100.0 * self.jump_forward_cache.get_cache_hit_rate():.2f}%. "
             #    f"ff_cache_avg_init_time: {self.jump_forward_cache.get_avg_init_time():.2f}s. "
-            #)
+            # )
 
+        # Return the new batch
         new_batch = Batch.init_new(
             can_run_list,
             self.req_to_token_pool,
@@ -425,11 +447,10 @@ class ModelServer():
 
             # Only transfer the selected logprobs of the next token to CPU to reduce overhead.
             if last_logprobs is not None:
-                last_token_logprobs = (
-                    last_logprobs[
-                        torch.arange(len(batch.reqs), device=next_token_ids.device),
-                        next_token_ids].tolist()
-                )
+                last_token_logprobs = last_logprobs[
+                    torch.arange(len(batch.reqs), device=next_token_ids.device),
+                    next_token_ids,
+                ].tolist()
 
             next_token_ids = next_token_ids.tolist()
         else:
@@ -443,32 +464,69 @@ class ModelServer():
             req.check_finished()
 
             if req.return_logprob:
-                req.normalized_prompt_logprob = normalized_prompt_logprobs[i]
+                if req.normalized_prompt_logprob is None:
+                    req.normalized_prompt_logprob = normalized_prompt_logprobs[i]
 
-                # If logprob_start_len > 0, then first logprob_start_len prompt tokens will be ignored.
-                req.prefill_token_logprobs = list(
-                    zip(
-                        prefill_token_logprobs[pt : pt + req.extend_input_len - 1],
-                        req.input_ids[-req.extend_input_len + 1 :],
+                if req.prefill_token_logprobs is None:
+                    # If logprob_start_len > 0, then first logprob_start_len prompt tokens will be ignored.
+                    req.prefill_token_logprobs = list(
+                        zip(
+                            prefill_token_logprobs[pt : pt + req.extend_input_len - 1],
+                            req.input_ids[-req.extend_input_len + 1 :],
+                        )
                     )
-                )
-                if req.logprob_start_len == 0:
-                    req.prefill_token_logprobs = [
-                        (None, req.input_ids[0])
-                    ] + req.prefill_token_logprobs
-                req.decode_token_logprobs = [
+                    if req.logprob_start_len == 0:
+                        req.prefill_token_logprobs = [
+                            (None, req.input_ids[0])
+                        ] + req.prefill_token_logprobs
+
+                if req.last_update_decode_tokens != 0:
+                    req.decode_token_logprobs.extend(
+                        list(
+                            zip(
+                                prefill_token_logprobs[
+                                    pt
+                                    + req.extend_input_len
+                                    - req.last_update_decode_tokens : pt
+                                    + req.extend_input_len
+                                    - 1
+                                ],
+                                req.input_ids[-req.last_update_decode_tokens + 1 :],
+                            )
+                        )
+                    )
+
+                req.decode_token_logprobs.append(
                     (last_token_logprobs[i], next_token_ids[i])
-                ]
+                )
 
             if req.top_logprobs_num > 0:
-                req.prefill_top_logprobs = prefill_top_logprobs[i]
-                if req.logprob_start_len == 0:
-                    req.prefill_top_logprobs = [None] + req.prefill_top_logprobs
-                req.decode_top_logprobs = [decode_top_logprobs[i]]
+                if req.prefill_top_logprobs is None:
+                    req.prefill_top_logprobs = prefill_top_logprobs[i]
+                    if req.logprob_start_len == 0:
+                        req.prefill_top_logprobs = [None] + req.prefill_top_logprobs
+
+                if req.last_update_decode_tokens != 0:
+                    req.decode_top_logprobs.extend(
+                        prefill_top_logprobs[i][-req.last_update_decode_tokens + 1 :]
+                    )
+                req.decode_top_logprobs.append(decode_top_logprobs[i])
 
             pt += req.extend_input_len
 
         self.handle_finished_requests(batch)
+
+    def cache_filled_batch(self, batch: Batch):
+        req_pool_indices_cpu = batch.req_pool_indices.cpu().numpy()
+        for i, req in enumerate(batch.reqs):
+            new_prefix_indices, new_last_node = self.tree_cache.cache_req(
+                token_ids=tuple(req.input_ids + req.output_ids)[:-1],
+                last_uncached_pos=len(req.prefix_indices),
+                req_pool_idx=req_pool_indices_cpu[i],
+                del_in_memory_pool=False,
+                old_last_node=req.last_node,
+            )
+            req.prefix_indices, req.last_node = new_prefix_indices, new_last_node
 
     def forward_decode_batch(self, batch: Batch):
         output_ids = [r.output_ids[:] for r in batch.reqs]
@@ -477,7 +535,7 @@ class ModelServer():
         # check if decode out of memory
         if not batch.check_decode_mem():
             old_ratio = self.new_token_ratio
-            self.new_token_ratio = min(old_ratio + self.new_token_ratio_step[1], 1.0)
+            self.new_token_ratio = min(old_ratio + self.new_token_ratio_recovery, 1.0)
 
             retracted_reqs = batch.retract_decode()
             logger.info(
@@ -488,26 +546,13 @@ class ModelServer():
             self.forward_queue.extend(retracted_reqs)
         else:
             self.new_token_ratio = max(
-                self.new_token_ratio - self.new_token_ratio_step[0],
+                self.new_token_ratio - self.new_token_ratio_decay,
                 self.min_new_token_ratio,
             )
 
         if not self.disable_regex_jump_forward:
             # check for jump-forward
-            jump_forward_reqs = batch.check_for_jump_forward()
-
-            # check for image jump-forward
-            for req in jump_forward_reqs:
-                if req.pixel_values is not None:
-                    (
-                        req.input_ids,
-                        req.image_offset,
-                    ) = self.model_runner.model.pad_input_ids(
-                        req.input_ids,
-                        req.pad_value,
-                        req.pixel_values.shape,
-                        req.image_size,
-                    )
+            jump_forward_reqs = batch.check_for_jump_forward(self.model_runner)
 
             self.forward_queue.extend(jump_forward_reqs)
             if batch.is_empty():
@@ -550,8 +595,8 @@ class ModelServer():
 
     def handle_finished_requests(self, batch: Batch):
         output_rids = []
+        prev_output_strs = []
         output_tokens = []
-        output_and_jump_forward_strs = []
         output_hit_stop_str = []
         output_skip_special_tokens = []
         output_spaces_between_special_tokens = []
@@ -575,8 +620,8 @@ class ModelServer():
                 )
             ):
                 output_rids.append(req.rid)
+                prev_output_strs.append(req.prev_output_str)
                 output_tokens.append(req.output_ids)
-                output_and_jump_forward_strs.append(req.output_and_jump_forward_str)
                 output_hit_stop_str.append(req.hit_stop_str)
                 output_skip_special_tokens.append(
                     req.sampling_params.skip_special_tokens
@@ -593,7 +638,7 @@ class ModelServer():
                     - req.prompt_tokens,
                     "completion_tokens_ids": req.output_ids,
                     "completion_tokens_wo_jump_forward": req.completion_tokens_wo_jump_forward,
-                    "finish_reason": str(req.finish_reason),  # FIXME: convert to the correct string
+                    "finish_reason": FinishReason.to_str(req.finish_reason),
                     "hit_stop_str": req.hit_stop_str,
                 }
                 if req.return_logprob:
@@ -618,8 +663,8 @@ class ModelServer():
             self.out_pyobjs.append(
                 BatchTokenIDOut(
                     output_rids,
+                    prev_output_strs,
                     output_tokens,
-                    output_and_jump_forward_strs,
                     output_hit_stop_str,
                     output_skip_special_tokens,
                     output_spaces_between_special_tokens,
@@ -634,17 +679,13 @@ class ModelServer():
             req_pool_indices_cpu = batch.req_pool_indices.tolist()
             for i in finished_indices:
                 req = batch.reqs[i]
-                req_pool_idx = req_pool_indices_cpu[i]
-                token_ids = tuple(req.input_ids + req.output_ids)
-                seq_len = len(token_ids) - 1
-                indices = self.req_to_token_pool.req_to_token[req_pool_idx, :seq_len]
-                prefix_len = self.tree_cache.insert(
-                    token_ids[:seq_len], indices.clone()
+                self.tree_cache.cache_req(
+                    token_ids=tuple(req.input_ids + req.output_ids)[:-1],
+                    last_uncached_pos=len(req.prefix_indices),
+                    req_pool_idx=req_pool_indices_cpu[i],
                 )
 
-                self.token_to_kv_pool.dec_refs(indices[:prefix_len])
-                self.req_to_token_pool.free(req_pool_idx)
-                self.tree_cache.dec_ref_counter(req.last_node)
+                self.tree_cache.dec_lock_ref(req.last_node)
 
             # Update batch tensors
             if unfinished_indices:
@@ -652,19 +693,56 @@ class ModelServer():
             else:
                 batch.reqs = []
 
+    def flush_cache(self):
+        if len(self.forward_queue) == 0 and (
+            self.running_batch is None or len(self.running_batch.reqs) == 0
+        ):
+            self.tree_cache.reset()
+            self.tree_cache_metrics = {"total": 0, "hit": 0}
+            self.regex_fsm_cache.reset()
+            self.req_to_token_pool.clear()
+            self.token_to_kv_pool.clear()
+            torch.cuda.empty_cache()
+            logger.info("Cache flushed successfully!")
+        else:
+            warnings.warn(
+                f"Cache not flushed because there are pending requests. "
+                f"#queue-req: {len(self.forward_queue)}, "
+                f"#running-req: {0 if self.running_batch is None else len(self.running_batch.reqs)}"
+            )
+
+    def abort_request(self, recv_req):
+        # Delete requests in the waiting queue
+        to_del = None
+        for i, req in enumerate(self.forward_queue):
+            if req.rid == recv_req.rid:
+                to_del = i
+                break
+
+        if to_del is not None:
+            del self.forward_queue[to_del]
+
+        # Delete requests in the running batch
+        if self.running_batch:
+            for req in self.running_batch.reqs:
+                if req.rid == recv_req.rid:
+                    req.finished = True
+                    req.finish_reason = FinishReason.ABORT
+                    break
+
 
 class ModelRpcService(rpyc.Service):
     exposed_ModelRpcServer = ModelServer
 
 
 class ModelClient:
-    def __init__(self, server_args: ServerArgs, port_args: PortArgs):
+    def __init__(self, server_args: ServerArgs, port_args: PortArgs, model_overide_args):
         tp_size = server_args.tp_size
 
         if tp_size == 1:
             # Init model
             self.model_server = ModelRpcService().exposed_ModelRpcServer(
-                0, server_args, port_args
+                0, server_args, port_args, model_overide_args
             )
 
             # Wrap functions
@@ -685,7 +763,7 @@ class ModelClient:
                 # Init model
                 def init_model(i):
                     return self.remote_services[i].ModelRpcServer(
-                        i, server_args, port_args
+                        i, server_args, port_args, model_overide_args
                     )
 
                 self.model_servers = executor.map(init_model, range(tp_size))
@@ -708,7 +786,11 @@ def _init_service(port):
     t = ThreadedServer(
         ModelRpcService(),
         port=port,
-        protocol_config={"allow_pickle": True, "sync_request_timeout": 1800},
+        protocol_config={
+            "allow_public_attrs": True,
+            "allow_pickle": True,
+            "sync_request_timeout": 3600,
+        },
     )
     t.start()
 
@@ -724,7 +806,11 @@ def start_model_process(port):
             con = rpyc.connect(
                 "localhost",
                 port,
-                config={"allow_pickle": True, "sync_request_timeout": 1800},
+                config={
+                    "allow_public_attrs": True,
+                    "allow_pickle": True,
+                    "sync_request_timeout": 3600,
+                },
             )
             break
         except ConnectionRefusedError:

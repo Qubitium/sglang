@@ -15,6 +15,7 @@ class ServerArgs:
     chat_template: Optional[str] = None
     trust_remote_code: bool = True
     context_length: Optional[int] = None
+    quantization: Optional[str] = None
 
     # Port
     host: str = "127.0.0.1"
@@ -23,7 +24,8 @@ class ServerArgs:
 
     # Memory and scheduling
     mem_fraction_static: Optional[float] = None
-    max_prefill_num_token: Optional[int] = None
+    max_prefill_tokens: Optional[int] = None
+    max_running_requests: Optional[int] = None
     schedule_heuristic: str = "lpm"
     schedule_conservativeness: float = 1.0
 
@@ -80,10 +82,12 @@ class ServerArgs:
             default=ServerArgs.tokenizer_path,
             help="The path of the tokenizer.",
         )
-        parser.add_argument("--host", type=str, default=ServerArgs.host,
-                            help="The host of the server.")
-        parser.add_argument("--port", type=int, default=ServerArgs.port,
-                            help="The port of the server.")
+        parser.add_argument(
+            "--host", type=str, default=ServerArgs.host, help="The host of the server."
+        )
+        parser.add_argument(
+            "--port", type=int, default=ServerArgs.port, help="The port of the server."
+        )
         parser.add_argument(
             "--additional-ports",
             type=int,
@@ -134,22 +138,35 @@ class ServerArgs:
             help="The model's maximum context length. Defaults to None (will use the value from the model's config.json instead).",
         )
         parser.add_argument(
+            "--quantization",
+            type=str,
+            default=ServerArgs.quantization,
+            help="The quantization method.",
+        )
+        parser.add_argument(
             "--mem-fraction-static",
             type=float,
             default=ServerArgs.mem_fraction_static,
             help="The fraction of the memory used for static allocation (model weights and KV cache memory pool). Use a smaller value if you see out-of-memory errors.",
         )
         parser.add_argument(
-            "--max-prefill-num-token",
+            "--max-prefill-tokens",
             type=int,
-            default=ServerArgs.max_prefill_num_token,
+            default=ServerArgs.max_prefill_tokens,
             help="The maximum number of tokens in a prefill batch. The real bound will be the maximum of this value and the model's maximum context length.",
+        )
+        parser.add_argument(
+            "--max-running-requests",
+            type=int,
+            default=ServerArgs.max_running_requests,
+            help="The maximum number of running requests.",
         )
         parser.add_argument(
             "--schedule-heuristic",
             type=str,
             default=ServerArgs.schedule_heuristic,
-            help="Schudule mode: [lpm, weight, random, fcfs]",
+            choices=["lpm", "random", "fcfs", "dfs-weight"],
+            help="Scheduling Heuristic.",
         )
         parser.add_argument(
             "--schedule-conservativeness",
