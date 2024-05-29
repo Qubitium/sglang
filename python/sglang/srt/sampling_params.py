@@ -41,7 +41,7 @@ class SamplingParams:
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.dtype = dtype
         self.regex = regex
-        self.logits_processors = logits_processors
+        self.logits_processors = logits_processors if logits_processors else []
 
         # Process some special cases
         if self.temperature < _SAMPLING_EPS:
