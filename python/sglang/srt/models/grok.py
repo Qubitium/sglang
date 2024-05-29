@@ -11,6 +11,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm import _custom_ops as ops
+from vllm.config import CacheConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -537,6 +538,8 @@ class Grok1ModelForCausalLM(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        # vllm.model_executor.model_loader.get_model() requires this keyword parameter
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()

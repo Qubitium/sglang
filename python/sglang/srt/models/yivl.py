@@ -1,12 +1,13 @@
 """Inference-only Yi-VL model."""
 
-from typing import Tuple, Iterable
+from typing import Tuple, Iterable, Optional
 
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionModel, LlavaConfig
+from vllm.config import CacheConfig
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
 from sglang.srt.models.llava import (
     LlavaLlamaForCausalLM,
     monkey_path_clip_vision_embed_forward,
@@ -15,7 +16,11 @@ from sglang.srt.models.llava import (
 
 class YiVLForCausalLM(LlavaLlamaForCausalLM):
     def __init__(
-        self, config, quant_config = None,
+        self,
+        config,
+        # vllm.model_executor.model_loader.get_model() requires this keyword parameter
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__(config, quant_config)
 
