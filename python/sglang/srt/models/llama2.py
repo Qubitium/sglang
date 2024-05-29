@@ -7,6 +7,7 @@ import torch
 import tqdm
 from torch import nn
 from transformers import LlamaConfig
+from vllm.config import CacheConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size
@@ -257,6 +258,7 @@ class LlamaForCausalLM(nn.Module):
     def __init__(
         self,
         config: LlamaConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
