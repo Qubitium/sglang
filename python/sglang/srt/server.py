@@ -11,6 +11,7 @@ import threading
 import time
 from http import HTTPStatus
 from typing import Optional
+import uvicorn
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -68,16 +69,16 @@ API_KEY_HEADER_NAME = "X-API-Key"
 #         return response
 
 
-# app = FastAPI()
+app = FastAPI()
 tokenizer_manager = None
 
-# @app.get("/health")
+@app.get("/health")
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
 
 
-# @app.get("/get_model_info")
+@app.get("/get_model_info")
 async def get_model_info():
     result = {
         "model_path": tokenizer_manager.model_path,
@@ -85,12 +86,12 @@ async def get_model_info():
     return result
 
 
-# @app.get("/get_server_args")
+@app.get("/get_server_args")
 async def get_server_args():
     return dataclasses.asdict(tokenizer_manager.server_args)
 
 
-# @app.get("/flush_cache")
+@app.get("/flush_cache")
 async def flush_cache():
     tokenizer_manager.flush_cache()
     return Response(
@@ -98,63 +99,6 @@ async def flush_cache():
                 "(When there are running or waiting requests, the operation will not be performed.)\n",
         status_code=200,
     )
-
-
-async def detokenize_logprob_tokens(token_logprobs, decode_to_text):
-    if not decode_to_text:
-        return [(logprob, token_id, None) for logprob, token_id in token_logprobs]
-
-    token_ids = [tid for _, tid in token_logprobs]
-    token_texts = await tokenizer_manager.detokenize(DetokenizeReqInput(token_ids))
-    return [
-        (logprob, token_id, token_text)
-        for (logprob, token_id), token_text, in zip(token_logprobs, token_texts)
-    ]
-
-
-async def detokenize_top_logprobs_tokens(top_logprobs, decode_to_text):
-    for i, t in enumerate(top_logprobs):
-        if top_logprobs[i] is not None:
-            top_logprobs[i] = await detokenize_logprob_tokens(t, decode_to_text)
-    return top_logprobs
-
-
-async def handle_token_logprobs_results(obj: GenerateReqInput, ret):
-    """Handle the token logprobs results, convert token ids to text if needed.
-
-    Args:
-        obj (GenerateReqInput): The request object.
-        ret (Union[Dict, List[Dict]]): The response object.
-    """
-    # NOTE: This is because the multiple requests in one http request.
-
-    async def convert_style(r, return_text):
-        r["meta_info"]["prefill_token_logprobs"] = await detokenize_logprob_tokens(
-            r["meta_info"]["prefill_token_logprobs"], return_text
-        )
-        r["meta_info"]["decode_token_logprobs"] = await detokenize_logprob_tokens(
-            r["meta_info"]["decode_token_logprobs"], return_text
-        )
-        r["meta_info"]["prefill_top_logprobs"] = await detokenize_top_logprobs_tokens(
-            r["meta_info"]["prefill_top_logprobs"], return_text
-        )
-        r["meta_info"]["decode_top_logprobs"] = await detokenize_top_logprobs_tokens(
-            r["meta_info"]["decode_top_logprobs"], return_text
-        )
-
-    if isinstance(obj.text, str):
-        if obj.return_logprob:
-            await convert_style(ret, obj.return_text_in_logprobs)
-    else:
-        for i, r in enumerate(ret):
-            if obj.return_logprob[i]:
-                await convert_style(r, obj.return_text_in_logprobs)
-
-
-async def stream_generator(obj: GenerateReqInput):
-    async for out in tokenizer_manager.generate_request(obj):
-        await handle_token_logprobs_results(obj, out)
-        yield out
 
 
 async def generate_request(obj: GenerateReqInput, request: Request = None):
@@ -181,21 +125,21 @@ async def generate_request(obj: GenerateReqInput, request: Request = None):
             )
 
 
-# app.post("/generate")(generate_request)
-# app.put("/generate")(generate_request)
+app.post("/generate")(generate_request)
+app.put("/generate")(generate_request)
 
 
-#@app.post("/v1/completions")
+@app.post("/v1/completions")
 async def openai_v1_completions(raw_request: Request):
     return await v1_completions(tokenizer_manager, raw_request)
 
 
-#@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions")
 async def openai_v1_chat_completions(raw_request: Request):
     return await v1_chat_completions(tokenizer_manager, raw_request)
 
 
-def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None, model_overide_args=None):
+def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None, model_overide_args=None):
     print("launch_server started.... ")
     global tokenizer_manager
 
@@ -250,7 +194,8 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None, mod
     # Launch processes
     tokenizer_manager = TokenizerManager(server_args, router_chan, detokenizer_chan, idle_chan, model_overide_args)
 
-    tokenizer_init_chan.put_nowait("init ok")
+    if tokenizer_init_chan:
+        tokenizer_init_chan.put_nowait("init ok")
 
     if server_args.dp_size == 1:
         start_process = start_controller_process_single
@@ -284,16 +229,6 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None, mod
 
     # if server_args.api_key and server_args.api_key != "":
     #     app.add_middleware(APIKeyValidatorMiddleware, api_key=server_args.api_key)
-
-    # def _launch_server():
-    #     uvicorn.run(
-    #         app,
-    #         host=server_args.host,
-    #         port=server_args.port,
-    #         log_level=server_args.log_level,
-    #         timeout_keep_alive=5,
-    #         loop="uvloop",
-    #     )
 
     # Send a warmup request
     def _wait_and_warmup():
@@ -335,27 +270,28 @@ def launch_server(server_args, tokenizer_init_chan, pipe_finish_writer=None, mod
         if pipe_finish_writer is not None:
             pipe_finish_writer.send("init ok")
 
-    # t = threading.Thread(target=_wait_and_warmup)
-    # t.start()
-    #
-    # # Listen for requests
-    # try:
-    #     uvicorn.run(
-    #         app,
-    #         host=server_args.host,
-    #         port=server_args.port,
-    #         log_level=server_args.log_level,
-    #         timeout_keep_alive=5,
-    #         loop="uvloop",
-    #     )
-    # finally:
-    #     t.join()
+    if tokenizer_init_chan is None:
+        t = threading.Thread(target=_wait_and_warmup)
+        t.start()
+
+        # Listen for requests
+        try:
+            uvicorn.run(
+                app,
+                host=server_args.host,
+                port=server_args.port,
+                log_level=server_args.log_level,
+                timeout_keep_alive=5,
+                loop="uvloop",
+            )
+        finally:
+            t.join()
 
 
 class Runtime:
     def __init__(
         self,
-        tokenizer_init_chan: mp.Queue,
+        tokenizer_init_chan: mp.Queue = None,
         log_level: str = "error",
         model_overide_args: Optional[dict] = None,
         *args,
