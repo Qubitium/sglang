@@ -5,18 +5,13 @@ import pkgutil
 from dataclasses import dataclass
 from functools import lru_cache
 
-from typing import List, Optional
-
-import numpy as np
-import torch
 import triton
 from sglang.srt.layers import token_attention
 
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.distributed import init_distributed_environment, ensure_model_parallel_initialized
+from vllm.distributed import init_distributed_environment
 
 from typing import List, Optional, Type
 
@@ -266,13 +261,16 @@ class ModelRunner:
         logger.info(f"[gpu_id={self.gpu_id}] Set cuda device.")
         torch.cuda.set_device(self.gpu_id)
         logger.info(f"[gpu_id={self.gpu_id}] Init nccl begin.")
-        torch.distributed.init_process_group(
+
+        init_distributed_environment(
             backend="nccl",
             world_size=self.tp_size,
             rank=self.tp_rank,
-            init_method=f"tcp://127.0.0.1:{self.nccl_port}",
+            distributed_init_method=f"tcp://127.0.0.1:{self.nccl_port}",
         )
+
         initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
+        
         total_gpu_memory = get_available_gpu_memory(
             self.gpu_id, distributed=self.tp_size > 1
         )
