@@ -1,14 +1,14 @@
 """Meta data for requests and batches"""
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
 
 from sglang.srt.managers.controller.radix_cache import RadixCache
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
-from sglang.srt.sampling_params import CustomLogitsProcessor
+from sglang.srt.sampling_params import SamplingParams, CustomLogitsProcessor
 
 
 class ForwardMode(IntEnum):
@@ -73,7 +73,7 @@ class Req:
         self.pad_value = None
 
         # Sampling parameters
-        self.sampling_params = None
+        self.sampling_params: SamplingParams = None
         self.stream = False
 
         # Check finish
@@ -322,6 +322,8 @@ class Batch:
                     )
                 logit_bias[i] = int_token_logit_bias
 
+        self.logit_bias = logit_bias
+
         # Set fields
         self.input_ids = torch.tensor(
             flatten_input_ids, dtype=torch.int32, device=device
@@ -339,34 +341,45 @@ class Batch:
         self.out_cache_loc = out_cache_loc
         self.top_logprobs_nums = [r.top_logprobs_num for r in reqs]
 
-        self.temperatures = torch.tensor(
-            [r.sampling_params.temperature for r in reqs],
-            dtype=torch.float,
-            device=device,
-        ).view(-1, 1)
+        has_temperatures = any(r.sampling_params.temperature != 1.0 for r in self.reqs)
+        if has_temperatures:
+            self.temperatures = torch.tensor(
+                [r.sampling_params.temperature for r in reqs],
+                dtype=torch.float,
+                device=device,
+            ).view(-1, 1)
+
         self.top_ps = torch.tensor(
             [r.sampling_params.top_p for r in reqs], dtype=torch.float, device=device
         ).view(-1, 1)
         self.top_ks = torch.tensor(
             [r.sampling_params.top_k for r in reqs], dtype=torch.int, device=device
         ).view(-1, 1)
-        self.frequency_penalties = torch.tensor(
-            [r.sampling_params.frequency_penalty for r in reqs],
-            dtype=torch.float,
-            device=device,
-        )
-        self.presence_penalties = torch.tensor(
-            [r.sampling_params.presence_penalty for r in reqs],
-            dtype=torch.float,
-            device=device,
-        )
-        self.repetition_penalties = torch.tensor(
-            [r.sampling_params.repetition_penalty for r in reqs],
-            dtype=logits_dtype,
-            device=device,
+
+        has_frequency_penalties = any(r.sampling_params.frequency_penalty != 0.0 for r in self.reqs)
+        if has_frequency_penalties:
+            self.frequency_penalties = torch.tensor(
+                [r.sampling_params.frequency_penalty for r in reqs],
+                dtype=torch.float,
+                device=device,
+            )
+
+        has_presence_penalties = any(r.sampling_params.presence_penalty != 0.0 for r in self.reqs)
+        if has_presence_penalties:
+            self.presence_penalties = torch.tensor(
+                [r.sampling_params.presence_penalty for r in reqs],
+                dtype=torch.float,
+                device=device,
+            )
+
+        has_repetition_penalties = any(r.sampling_params.repetition_penalty != 1.0 for r in self.reqs)
+        if has_repetition_penalties:
+            self.repetition_penalties = torch.tensor(
+                [r.sampling_params.repetition_penalty for r in reqs],
+                dtype=logits_dtype,
+                device=device,
         ).view(-1, 1)
 
-        self.logit_bias = logit_bias
 
     def check_decode_mem(self):
         bs = len(self.reqs)
@@ -526,7 +539,7 @@ class Batch:
             "logit_bias",
         ]:
             self_val = getattr(self, item, None)
-            # logit_bias can be None
+            # frequency_penalties, presence_penalties, repetition_penalties, and logit_bias can be None
             if self_val is not None:
                 setattr(self, item, self_val[new_indices])
 
@@ -546,16 +559,52 @@ class Batch:
         self.return_logprob = any(req.return_logprob for req in self.reqs)
 
         for item in [
-            "temperatures",
             "top_ps",
             "top_ks",
-            "frequency_penalties",
-            "presence_penalties",
-            "repetition_penalties",
         ]:
             self_val = getattr(self, item, None)
             other_val = getattr(other, item, None)
+
             setattr(self, item, torch.concat([self_val, other_val]))
+
+        # temperatures can be None
+        if self.temperatures is not None or other.temperatures is not None:
+            if self.temperatures is None:
+                self.temperatures = torch.tensor([], dtype=torch.float, device="cuda")
+            if other.temperatures is None:
+                other.temperatures = torch.tensor([], dtype=torch.float, device="cuda")
+
+            self.temperatures = torch.concat([self.temperatures, other.temperatures])
+
+        # frequency_penalties can be None
+        if self.frequency_penalties is not None or other.frequency_penalties is not None:
+            if self.frequency_penalties is None:
+                self.frequency_penalties = torch.tensor([], dtype=torch.float, device="cuda")
+            if other.frequency_penalties is None:
+                other.frequency_penalties = torch.tensor([], dtype=torch.float, device="cuda")
+
+            self.frequency_penalties = torch.concat([self.frequency_penalties, other.frequency_penalties])
+
+        # presence_penalties can be None
+        if self.presence_penalties is not None or other.presence_penalties is not None:
+            if self.presence_penalties is None:
+                self.presence_penalties = torch.tensor([], dtype=torch.float, device="cuda")
+            if other.presence_penalties is None:
+                other.presence_penalties = torch.tensor([], dtype=torch.float, device="cuda")
+
+            self.presence_penalties = torch.concat([self.presence_penalties, other.presence_penalties])
+
+        # presence_penalties can be None
+        if self.repetition_penalties is not None or other.repetition_penalties is not None:
+            dtype = self_val.repetition_penalties.dtype if self_val.repetition_penalties is not None \
+                else other_val.repetition_penalties.dtype
+
+            if self_val.repetition_penalties is None:
+                self.repetition_penalties = torch.tensor([], dtype=dtype, device="cuda")
+            if other.repetition_penalties is None:
+                other.repetition_penalties = torch.tensor([], dtype=dtype, device="cuda")
+
+            self.repetition_penalties = torch.concat([self.repetition_penalties, other.repetition_penalties])
 
         # logit_bias can be None
         if self.logit_bias is not None or other.logit_bias is not None:
@@ -580,17 +629,16 @@ class Batch:
 
         # Referring to the transformers execution order, repetition_penalty should come before temperatures.
         # see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L2710
-        if self.output_tokens is not None and len(self.output_tokens) > 0:
+        if self.output_tokens and (self.repetition_penalties is not None and self.repetition_penalties.numel() > 0):
             assert len(self.output_tokens) == len(
                 self.repetition_penalties), f"output_tokens({self.output_tokens}) don't match repetition_penalties({self.repetition_penalties})"
             for i, r in enumerate(self.repetition_penalties):
-                # If any of the repetition_penalties values is 1, only apply_repetition_penalty() that is not 1 is executed.
-                if not (r == 1.0).item():
-                    apply_repetition_penalty(r, self.output_tokens[i], logits[i], dim=0)
+                apply_repetition_penalty(r, self.output_tokens[i], logits[i], dim=0)
 
-        logits.div_(self.temperatures)
+        if self.temperatures is not None and self.temperatures.numel() > 0:
+            logits.div_(self.temperatures)
 
-        if self.logit_bias is not None:
+        if self.logit_bias is not None and self.logit_bias.numel() > 0:
             logits.add_(self.logit_bias)
 
         has_regex = any(req.regex_fsm is not None for req in self.reqs)
