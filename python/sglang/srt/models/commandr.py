@@ -52,7 +52,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.managers.controller.model_runner import InputMetadata
 
 
-@torch.compile
+@torch.compile(fullgraph=True)
 def layer_norm_func(hidden_states, weight, variance_epsilon):
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
@@ -192,6 +192,7 @@ class CohereAttention(nn.Module):
                 eps=config.layer_norm_eps,
             )
 
+    @torch.compile(fullgraph=True)
     def _apply_qk_norm(self, q, k):
         q = q.view(*q.shape[:-1], -1, self.head_dim)
         k = k.view(*k.shape[:-1], -1, self.head_dim)
