@@ -119,6 +119,8 @@ class TokenizerManager:
             )
 
     async def generate_request(self, obj: GenerateReqInput, request=None):
+        # lbx changed. We currently do not support streaming
+        obj.stream = False
         await self.start()
 
         obj.post_init()
@@ -312,7 +314,8 @@ class TokenizerManager:
             return
         del self.rid_to_state[rid]
         req = AbortReq(rid)
-        self.send_to_router.send_pyobj(req)
+        # self.send_to_router.send_pyobj(req)
+        self.router_chan.put_nowait(req)
 
     def create_abort_task(self, obj):
         # Abort the request if the client is disconnected.
