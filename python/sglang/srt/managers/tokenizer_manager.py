@@ -25,7 +25,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling_params import SamplingParams
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_multimodal_model, load_image
 from sglang.utils import get_exception_traceback
 
@@ -171,40 +171,50 @@ class TokenizerManager:
                 stream=obj.stream,
             )
 
+            # no need to wait
+            asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
+
             event = asyncio.Event()
             state = ReqState([], False, event)
             self.rid_to_state[rid] = state
 
-            # no need to wait
-            asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
+            while True:
+                try:
+                    # print(f"tokenizer generate request single wait for event rid: {rid}")
+                    await asyncio.wait_for(event.wait(), timeout=4)
+                except asyncio.TimeoutError:
+                    if request is not None and await request.is_disconnected():
+                        self.abort_request(rid)
+                        raise ValueError(f"Abort request {rid}")
+                    continue
 
-            # print(f"tokenizer generate request single wait for event rid: {rid}")
-            await event.wait()
-            # try:
-            #     await asyncio.wait_for(event.wait(), timeout=4)
-            # except asyncio.TimeoutError:
-            #     if request is not None and await request.is_disconnected():
-            #         self.abort_request(rid)
-            #         raise ValueError(f"Abort request {rid}")
+                out = self.convert_logprob_style(
+                    state.out_list[-1],
+                    obj.return_logprob,
+                    obj.top_logprobs_num,
+                    obj.return_text_in_logprobs,
+                )
 
-            self.pending -= 1
-            assert self.pending >= 0
-            if self.pending == 0:
-                # print("PENDING state.finished => empty rid_stats! signal!")
-                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
-            else:
-                pass
-                # print(f"PENDING size: {self.pending}")
+                if self.server_args.log_requests and state.finished:
+                    logger.info(f"in={obj.text}, out={out}")
 
-            assert state.finished
-            del self.rid_to_state[rid]
+                # print(f"tokenizer generate request single wait for event done rid: {rid}")
+                state.out_list = []
+                if state.finished:
+                    self.pending -= 1
+                    assert self.pending >= 0
+                    if self.pending == 0:
+                        # print("PENDING state.finished => empty rid_stats! signal!")
+                        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
+                    else:
+                        pass
+                        # print(f"PENDING size: {self.pending}")
 
-            # print(f"tokenizer generate request single wait for event done rid: {rid}")
-            yield self.convert_logprob_style(state.out_list[-1],
-                                             obj.return_logprob,
-                                             obj.top_logprobs_num,
-                                             obj.return_text_in_logprobs)
-
+                    del self.rid_to_state[rid]
+                    yield out
+                    break
+                event.clear()
+                yield out
         else:
             # print(f"tokenizer generate_request multiple request")
             assert obj.stream is False
