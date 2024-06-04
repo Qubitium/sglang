@@ -10,8 +10,11 @@ import zmq
 
 from sglang.global_config import global_config
 from sglang.srt.managers.controller.tp_worker import ModelTpClient
+from sglang.srt.managers.io_struct import BatchTokenIDOut
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.utils import get_exception_traceback
+
+
 
 logger = logging.getLogger("srt.controller")
 CHECKING_INTERVAL = 5
@@ -44,6 +47,8 @@ class DataParallelWorkerThread(threading.Thread):
             requests = []
             while not self.request_queue.empty():
                 requests.append(self.request_queue.get())
+
+            out_pyobjs: List[BatchTokenIDOut] = []
             try:
                 out_pyobjs = await self.step(requests)
             except Exception:
@@ -56,12 +61,17 @@ class DataParallelWorkerThread(threading.Thread):
                 )
                 self.liveness = False
 
+            # TODO remove code after testing in DP
+            if len(out_pyobjs) > 0:
+                print(f"out_pyobjs: type: {type(out_pyobjs[0])}")
+
             for obj in out_pyobjs:
                 self.send_to_detokenizer.send_pyobj(obj)
 
             # async sleep for receiving the subsequent request and avoiding cache miss
             if len(out_pyobjs) != 0:
-                has_finished = any([obj.finished for obj in out_pyobjs])
+                # TODO remove comment after testing in DP
+                has_finished = any([obj.finished_reason is not None for obj in out_pyobjs])
                 if has_finished:
                     await asyncio.sleep(self.request_dependency_delay)
             await asyncio.sleep(global_config.wait_for_new_request_delay)

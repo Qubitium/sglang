@@ -1,7 +1,7 @@
 """Meta data for requests and batches"""
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import List, Optional
+from typing import List, Optional, Any
 
 import numpy as np
 import torch
@@ -17,24 +17,47 @@ class ForwardMode(IntEnum):
     DECODE = auto()
 
 
-class FinishReason(IntEnum):
-    EOS_TOKEN = auto()
-    LENGTH = auto()
-    STOP_STR = auto()
-    ABORT = auto()
+class BaseFinishReason:
+    def __init__(self, is_error: bool = False):
+        self.is_error = is_error
 
-    @staticmethod
-    def to_str(reason):
-        if reason == FinishReason.EOS_TOKEN:
-            return None
-        elif reason == FinishReason.LENGTH:
-            return "length"
-        elif reason == FinishReason.STOP_STR:
-            return "stop"
-        elif reason == FinishReason.ABORT:
-            return "abort"
-        else:
-            return None
+    def __str__(self):
+        raise NotImplementedError("Subclasses must implement this method")
+
+
+class FINISH_MATCHED_TOKEN(BaseFinishReason):
+    def __init__(self, matched: int | List[int]):
+        super().__init__()
+        self.matched = matched
+
+    def __str__(self) -> str:
+        return f"FINISH_MATCHED_TOKEN: {self.matched}"
+
+
+class FINISH_LENGTH(BaseFinishReason):
+    def __init__(self, length: int):
+        super().__init__()
+        self.length = length
+
+    def __str__(self) -> str:
+        return f"FINISH_LENGTH: {self.length}"
+
+
+class FINISH_MATCHED_STR(BaseFinishReason):
+    def __init__(self, matched: str):
+        super().__init__()
+        self.matched = matched
+
+    def __str__(self) -> str:
+        return f"FINISH_MATCHED_STR: {self.matched}"
+
+
+class FINISH_ABORT(BaseFinishReason):
+    def __init__(self):
+        super().__init__(is_error=True)
+
+    def __str__(self) -> str:
+        return "FINISH_ABORT"
 
 
 # Referring to RepetitionPenaltyLogitsProcessor.
@@ -78,9 +101,9 @@ class Req:
 
         # Check finish
         self.tokenizer = None
-        self.finished = False
-        self.finish_reason = None
-        self.hit_stop_str = None
+
+        # finished reason is a nullable object that covers all finish conditions
+        self.finished_reason: [BaseFinishReason] = None
 
         # Prefix info
         self.extend_input_len = 0
@@ -105,6 +128,10 @@ class Req:
         self.regex_fsm_state = 0
         self.jump_forward_map = None
 
+    # has request reached finished condition
+    def finished(self) -> bool:
+        return self.finished_reason is not None
+
     def partial_decode(self, ids):
         first_token = self.tokenizer.convert_ids_to_tokens(ids[0])
         first_token = (
@@ -116,23 +143,21 @@ class Req:
         return self.sampling_params.max_new_tokens
 
     def check_finished(self):
-        if self.finished:
+        if self.finished():
             return
 
         if (
-            len(self.prev_output_ids) + len(self.output_ids)
-            >= self.sampling_params.max_new_tokens
+                len(self.prev_output_ids) + len(self.output_ids)
+                >= self.sampling_params.max_new_tokens
         ):
-            self.finished = True
-            self.finish_reason = FinishReason.LENGTH
+            self.finished_reason = FINISH_LENGTH(len(self.prev_output_ids) + len(self.output_ids))
             return
 
         if (
                 self.output_ids[-1] == self.tokenizer.eos_token_id
-                and self.sampling_params.ignore_eos == False
+                and not self.sampling_params.ignore_eos
         ):
-            self.finished = True
-            self.finish_reason = FinishReason.EOS_TOKEN
+            self.finished_reason = FINISH_MATCHED_TOKEN(matched=self.tokenizer.eos_token_id)
             return
 
         if len(self.sampling_params.stop_strs) > 0:
@@ -143,9 +168,7 @@ class Req:
             for stop_str in self.sampling_params.stop_strs:
                 # FIXME: (minor) try incremental match in prev_output_str
                 if stop_str in tail_str or stop_str in self.prev_output_str:
-                    self.finished = True
-                    self.finish_reason = FinishReason.STOP_STR
-                    self.hit_stop_str = stop_str
+                    self.finished_reason = FINISH_MATCHED_STR(matched=stop_str)
                     return
 
     def jump_forward_and_retokenize(self, jump_forward_str, next_state):
@@ -379,7 +402,6 @@ class Batch:
                 dtype=logits_dtype,
                 device=device,
         ).view(-1, 1)
-
 
     def check_decode_mem(self):
         bs = len(self.reqs)

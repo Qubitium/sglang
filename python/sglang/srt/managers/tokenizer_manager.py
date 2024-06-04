@@ -18,6 +18,7 @@ from sglang.srt.hf_transformers_utils import (
 from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchStrOut,
+    BatchTokenIDOut,
     DetokenizeReqInput,
     FlushCacheReq,
     GenerateReqInput,
@@ -28,6 +29,8 @@ from sglang.srt.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_multimodal_model, load_image
 from sglang.utils import get_exception_traceback
+from sglang.srt.managers.controller.infer_batch import FINISH_MATCHED_STR
+
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -347,7 +350,7 @@ class TokenizerManager:
         print("in decoder_loop ")
         while True:
             # print(f"detokenizer detokenizer_chan get wait...")
-            recv_obj = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.get)
+            recv_obj: BatchTokenIDOut = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.get)
             # print(f"detokenizer detokenizer_chan get done: {recv_obj}")
 
             output_tokens = recv_obj.output_tokens
@@ -359,7 +362,7 @@ class TokenizerManager:
                                                    spaces_between_special_tokens=
                                                    recv_obj.spaces_between_special_tokens[0])
 
-            output_strs = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, batch_decode)
+            output_strs: List[str] = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, batch_decode)
 
             # Trim stop str
             # TODO(lmzheng): handle the case where multiple stop strs are hit
@@ -377,8 +380,9 @@ class TokenizerManager:
 
                 output_strs[i] = recv_obj.prev_output_strs[i] + output_strs[i]
 
-                if recv_obj.hit_stop_str[i] is not None:
-                    pos = output_strs[i].find(recv_obj.hit_stop_str[i])
+                # if recv_obj.hit_stop_str[i] is not None:
+                if isinstance(recv_obj.finished_reason[i], FINISH_MATCHED_STR):
+                    pos = output_strs[i].find(recv_obj.finished_reason[i].matched)
                     if pos != -1:
                         output_strs[i] = output_strs[i][:pos]
 
@@ -387,7 +391,7 @@ class TokenizerManager:
                 recv_obj.rids,
                 output_strs,
                 recv_obj.meta_info,
-                recv_obj.finished,
+                recv_obj.finished_reason,
             )
 
             # previously in another thread/loop
@@ -400,7 +404,7 @@ class TokenizerManager:
                 state = self.rid_to_state[rid]
 
                 state.out_list.append(out_dict)
-                state.finished = output.finished[i]
+                state.finished = output.finished_reason[i] is not None
                 # print(f"tokenizer state.event.set ready rid: {rid}")
                 state.event.set()
                 # print(f"tokenizer state.event.set ready done rid: {rid}")
