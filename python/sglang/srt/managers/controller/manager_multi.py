@@ -5,6 +5,7 @@ Each data parallel worker can manage multiple tensor parallel workers.
 
 import asyncio
 import logging
+import queue
 from enum import Enum, auto
 from typing import Dict
 import multiprocessing as mp
@@ -23,6 +24,8 @@ from sglang.srt.managers.controller.dp_worker import (
 )
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.utils import get_exception_traceback
+
+from sglang.srt.utils import flush_queue
 
 logger = logging.getLogger("srt.controller")
 
@@ -47,10 +50,16 @@ class Controller:
             server_args: ServerArgs,
             port_args: PortArgs,
             model_overide_args,
+            router_chan: mp.Queue,
+            detokenzier_chan: mp.Queue,
+            idle_chan: mp.Queue
     ):
         self.load_balance_method = LoadBalanceMethod.from_str(load_balance_method)
         self.server_args = server_args
-        self.port_args = port_args
+        # self.port_args = port_args
+        self.router_chan = router_chan
+        self.detokenizer_chan = detokenzier_chan
+        self.idle_chan = idle_chan
 
         if self.load_balance_method == LoadBalanceMethod.ROUND_ROBIN:
             self.round_robin_counter = 0
@@ -77,7 +86,7 @@ class Controller:
             try:
                 gpu_ids = list(range(i * tp_size, (i + 1) * tp_size))
                 worker_thread = start_data_parallel_worker(
-                    server_args, port_args, model_overide_args, gpu_ids, i
+                    server_args, port_args, model_overide_args, gpu_ids, i, detokenzier_chan
                 )
                 self.workers[i] = worker_thread
             except Exception:
@@ -126,42 +135,88 @@ class Controller:
                 del self.workers[i]
                 logger.info(f"Stale worker {i} removed")
 
+    # async def loop_for_forward(self):
+    #     while True:
+    #         print("multi loop_for_forward 1")
+    #         await self.remove_dead_workers()
+    #         print("multi loop_for_forward 2")
+    #         if self.have_any_live_worker():
+    #             next_step_input = list(self.recv_reqs)
+    #             print("multi loop_for_forward 3",next_step_input)
+    #             self.recv_reqs = []
+    #             if next_step_input:
+    #                 await self.dispatching(next_step_input)
+    #         # else:
+    #         #    logger.error("There is no live worker.")
+    #
+    #         await asyncio.sleep(global_config.wait_for_new_request_delay)
+
     async def loop_for_forward(self):
+        idle = True
         while True:
+            if not idle:
+                # print("forward check IDLE.....")
+                if not self.idle_chan.empty():
+                    # print("forward GOT IDLE signal")
+                    flush_queue(self.idle_chan)
+                    idle = True
+
+            recv_req = None
+            if idle:
+                # print("forward IDLE WAIT")
+                recv_req = self.router_chan.get()
+                idle = False
+                # print("forward IDLE WAIT complete", recv_req)
+            else:
+                pass
+                # print("CPU SPIN LOOP")
+
+            self.put_to_request_queue(recv_req)
+
+            wait_timeout = 0.010 if recv_req is not None else 0.0
+            while True:
+                try:
+                    if wait_timeout == 0.0:
+                        self.put_to_request_queue(self.router_chan.get(block=False))
+                    else:
+                        self.put_to_request_queue(self.router_chan.get(block=True, timeout=wait_timeout))
+                        wait_timeout = max(0.0, wait_timeout - 0.02)
+                except queue.Empty:
+                    break
+
             await self.remove_dead_workers()
 
             if self.have_any_live_worker():
                 next_step_input = list(self.recv_reqs)
                 self.recv_reqs = []
                 if next_step_input:
+                    print(f"manager_multi dispatching Requests size: {len(next_step_input)}")
                     await self.dispatching(next_step_input)
             # else:
             #    logger.error("There is no live worker.")
 
             await asyncio.sleep(global_config.wait_for_new_request_delay)
 
-    async def loop_for_recv_requests(self):
-        while True:
-            recv_req = await self.recv_from_tokenizer.recv_pyobj()
-            if isinstance(recv_req, FlushCacheReq):
-                # TODO(lsyin): apply more specific flushCacheReq
-                for worker_thread in self.workers.values():
-                    worker_thread.request_queue.put(recv_req)
-            elif isinstance(recv_req, TokenizedGenerateReqInput):
-                self.recv_reqs.append(recv_req)
-            elif isinstance(recv_req, AbortReq):
-                in_queue = False
-                for i, req in enumerate(self.recv_reqs):
-                    if req.rid == recv_req.rid:
-                        self.recv_reqs[i] = recv_req
-                        in_queue = True
-                        break
-                if not in_queue:
-                    # Send abort req to all TP groups
-                    for worker in list(self.workers.keys()):
-                        self.put_req_to_worker(worker, recv_req)
-            else:
-                logger.error(f"Invalid object: {recv_req}")
+    def put_to_request_queue(self, recv_req):
+        if isinstance(recv_req, FlushCacheReq):
+            # TODO(lsyin): apply more specific flushCacheReq
+            for worker_thread in self.workers.values():
+                worker_thread.request_queue.put(recv_req)
+        elif isinstance(recv_req, TokenizedGenerateReqInput):
+            self.recv_reqs.append(recv_req)
+        elif isinstance(recv_req, AbortReq):
+            in_queue = False
+            for i, req in enumerate(self.recv_reqs):
+                if req.rid == recv_req.rid:
+                    self.recv_reqs[i] = recv_req
+                    in_queue = True
+                    break
+            if not in_queue:
+                # Send abort req to all TP groups
+                for worker in list(self.workers.keys()):
+                    self.put_req_to_worker(worker, recv_req)
+        # else:
+        #     logger.error(f"Invalid object: {recv_req}")
 
 
 def start_controller_process(
@@ -180,7 +235,8 @@ def start_controller_process(
 
     try:
         controller = Controller(
-            server_args.load_balance_method, server_args, port_args, model_overide_args
+            server_args.load_balance_method, server_args, port_args, model_overide_args, router_chan, detokenizer_chan,
+            idle_chan
         )
     except Exception:
         startup_chan.put_nowait(get_exception_traceback())
@@ -190,9 +246,8 @@ def start_controller_process(
 
     # blocking
     try:
-        loop = asyncio.new_event_loop()
+        loop = asyncio.get_event_loop()
         asyncio.set_event_loop(loop)
-        # loop.create_task(controller.loop_for_recv_requests())
         loop.run_until_complete(controller.loop_for_forward())
     except KeyboardInterrupt:
         print("Caught KeyboardInterrupt, terminating sglang process")

@@ -6,21 +6,13 @@ import os
 import queue
 import psutil
 
-import uvloop
-import zmq
-import zmq.asyncio
 
 from sglang.global_config import global_config
 from sglang.srt.managers.controller.tp_worker import ModelTpClient
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.utils import get_exception_traceback
+from sglang.srt.utils import flush_queue
 
-def flush_queue(q: mp.Queue):
-    while True:
-        try:
-            q.get_nowait()
-        except queue.Empty:
-            break
 
 class ControllerSingle:
     def __init__(self, model_client: ModelTpClient, router_chan: mp.Queue, detokenzier_chan: mp.Queue,
@@ -56,7 +48,7 @@ class ControllerSingle:
                 # print("CPU SPIN LOOP")
 
             # if not idle, model is doing work, disable wait and set to 0ms
-            wait_timeout = global_config.request_dependency_delay if len(next_step_input) == 1 else 0.0
+            wait_timeout = 0.010 if len(next_step_input) == 1 else 0.0
             while True:
                 try:
                     if wait_timeout == 0.0:
@@ -69,7 +61,7 @@ class ControllerSingle:
 
             # print(f"model_client.step wait...")
             if len(next_step_input) > 0:
-                print(f"Forward Requests batch size: {len(next_step_input)}")
+                print(f"manager_single Forward Requests batch size: {len(next_step_input)}")
 
             output = await self.model_client.step(next_step_input)
 
@@ -78,13 +70,13 @@ class ControllerSingle:
 
 
 def start_controller_process(
-    server_args: ServerArgs,
-    port_args: PortArgs,
-    router_chan: mp.Queue,
-    detokenizer_chan: mp.Queue,
-    idle_chan: mp.Queue,
-    startup_chan: mp.Queue,
-    model_overide_args,
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        router_chan: mp.Queue,
+        detokenizer_chan: mp.Queue,
+        idle_chan: mp.Queue,
+        startup_chan: mp.Queue,
+        model_overide_args,
 ):
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
