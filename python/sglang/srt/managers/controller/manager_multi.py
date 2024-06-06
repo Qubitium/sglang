@@ -5,12 +5,11 @@ Each data parallel worker can manage multiple tensor parallel workers.
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from enum import Enum, auto
 from typing import Dict
-
-# import zmq
-# import zmq.asyncio
+import multiprocessing as mp
+import os
+import psutil
 
 from sglang.global_config import global_config
 from sglang.srt.managers.io_struct import (
@@ -43,11 +42,11 @@ class LoadBalanceMethod(Enum):
 
 class Controller:
     def __init__(
-        self,
-        load_balance_method: str,
-        server_args: ServerArgs,
-        port_args: PortArgs,
-        model_overide_args,
+            self,
+            load_balance_method: str,
+            server_args: ServerArgs,
+            port_args: PortArgs,
+            model_overide_args,
     ):
         self.load_balance_method = LoadBalanceMethod.from_str(load_balance_method)
         self.server_args = server_args
@@ -63,9 +62,9 @@ class Controller:
         self.dispatching = self.dispatch_lookup[self.load_balance_method]
 
         # Init communication
-        context = zmq.asyncio.Context()
-        self.recv_from_tokenizer = context.socket(zmq.PULL)
-        self.recv_from_tokenizer.bind(f"tcp://127.0.0.1:{port_args.router_port}")
+        # context = zmq.asyncio.Context()
+        # self.recv_from_tokenizer = context.socket(zmq.PULL)
+        # self.recv_from_tokenizer.bind(f"tcp://127.0.0.1:{port_args.router_port}")
 
         # Init status
         self.recv_reqs = []
@@ -136,7 +135,7 @@ class Controller:
                 self.recv_reqs = []
                 if next_step_input:
                     await self.dispatching(next_step_input)
-            #else:
+            # else:
             #    logger.error("There is no live worker.")
 
             await asyncio.sleep(global_config.wait_for_new_request_delay)
@@ -166,10 +165,13 @@ class Controller:
 
 
 def start_controller_process(
-    server_args: ServerArgs,
-    port_args: PortArgs,
-    pipe_writer,
-    model_overide_args=None,
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        router_chan: mp.Queue,
+        detokenizer_chan: mp.Queue,
+        idle_chan: mp.Queue,
+        startup_chan: mp.Queue,
+        model_overide_args,
 ):
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
@@ -181,11 +183,27 @@ def start_controller_process(
             server_args.load_balance_method, server_args, port_args, model_overide_args
         )
     except Exception:
-        pipe_writer.send(get_exception_traceback())
+        startup_chan.put_nowait(get_exception_traceback())
         raise
 
-    pipe_writer.send("init ok")
-    loop = asyncio.get_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(controller.loop_for_recv_requests())
-    loop.run_until_complete(controller.loop_for_forward())
+    startup_chan.put_nowait("init ok")
+
+    # blocking
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        # loop.create_task(controller.loop_for_recv_requests())
+        loop.run_until_complete(controller.loop_for_forward())
+    except KeyboardInterrupt:
+        print("Caught KeyboardInterrupt, terminating sglang process")
+        try:
+            cur_process = psutil.Process(os.getpid())
+            parent = cur_process.parent()
+        except psutil.NoSuchProcess:
+            return
+        children = cur_process.children(recursive=True)
+        for child in children:
+            child.kill()
+        psutil.wait_procs(children, timeout=5)
+        parent.kill()
+        parent.wait(timeout=5)
