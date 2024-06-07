@@ -397,7 +397,7 @@ class ModelRunner:
         self.token_to_kv_pool = TokenToKVPool(
             self.max_total_num_tokens,
             dtype=dtype,
-            head_num=self.model_config.num_key_value_heads // self.tp_size,
+            head_num=self.model_config.get_num_kv_heads(self.tp_size),
             head_dim=self.model_config.head_dim,
             layer_num=self.model_config.num_hidden_layers,
         )
@@ -522,6 +522,10 @@ def import_model_classes():
 
 def load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
     model_arch_name_to_cls = import_model_classes()
+
+    if model_arch == "ChatGLMModel":
+        model_arch = "ChatGLMForCausalLM"
+
     if model_arch not in model_arch_name_to_cls:
         raise ValueError(
             f"Unsupported architectures: {model_arch}. "
