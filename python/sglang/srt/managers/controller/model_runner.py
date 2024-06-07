@@ -30,7 +30,6 @@ from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_available_gpu_memory, is_multimodal_model
 
-from sglang.srt.sampling_params import CustomLogitsProcessor
 
 QUANTIONCONFIG_MAPPING = {"awq": AWQConfig, "gptq": GPTQConfig, "marlin": MarlinConfig}
 
@@ -75,8 +74,6 @@ class InputMetadata:
     kv_last_page_len: torch.Tensor = None
     prefill_wrapper = None
     decode_wrapper = None
-
-    logits_processors: Optional[List[List[CustomLogitsProcessor]]] = None
 
     def init_flashinfer_args(self, model_runner, tp_size):
         from flashinfer import (
@@ -165,7 +162,6 @@ class InputMetadata:
         out_cache_cont_end=None,
         top_logprobs_nums=None,
         return_logprob=False,
-        logits_processors=None,
     ):
         batch_size = len(req_pool_indices)
         start_loc = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
@@ -216,7 +212,6 @@ class InputMetadata:
             other_kv_index=other_kv_index,
             return_logprob=return_logprob,
             top_logprobs_nums=top_logprobs_nums,
-            logits_processors=logits_processors,
         )
 
         if forward_mode == ForwardMode.EXTEND:
@@ -419,7 +414,6 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
-            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -438,7 +432,6 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
-            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -459,7 +452,6 @@ class ModelRunner:
             out_cache_cont_end=batch.out_cache_cont_end,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
-            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -478,7 +470,6 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
-            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids,
