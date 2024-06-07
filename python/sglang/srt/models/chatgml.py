@@ -363,12 +363,6 @@ class ChatGLMForCausalLM(nn.Module):
             input_ids, hidden_states, self.lm_head.weight, input_metadata
         )
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
-                                       sampling_metadata)
-        return logits
-
     def sample(
         self,
         logits: torch.Tensor,
