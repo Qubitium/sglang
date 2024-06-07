@@ -4,6 +4,15 @@ import logging
 import pkgutil
 from dataclasses import dataclass
 from functools import lru_cache
+
+import triton
+from sglang.srt.layers import token_attention
+
+from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.marlin import MarlinConfig
+from vllm.distributed import init_distributed_environment
+
 from typing import List, Optional, Type
 
 import numpy as np
@@ -15,11 +24,15 @@ from vllm.distributed import initialize_model_parallel
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import ModelRegistry
 
+
 from sglang.srt.managers.controller.infer_batch import Batch, ForwardMode
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_available_gpu_memory, is_multimodal_model
 
+from sglang.srt.sampling_params import CustomLogitsProcessor
+
+QUANTIONCONFIG_MAPPING = {"awq": AWQConfig, "gptq": GPTQConfig, "marlin": MarlinConfig}
 
 logger = logging.getLogger("srt.model_runner")
 
@@ -63,7 +76,9 @@ class InputMetadata:
     prefill_wrapper = None
     decode_wrapper = None
 
-    def init_flashinfer_args(self, tp_size):
+    logits_processors: Optional[List[List[CustomLogitsProcessor]]] = None
+
+    def init_flashinfer_args(self, model_runner, tp_size):
         from flashinfer import (
             BatchDecodeWithPagedKVCacheWrapper,
             BatchPrefillWithPagedKVCacheWrapper,
@@ -126,7 +141,7 @@ class InputMetadata:
                 self.model_runner.model_config.head_dim,
                 1,
                 "NONE",
-                "float16",
+                model_runner.torch_dtype,
             )
 
     def init_extend_args(self):
@@ -150,6 +165,7 @@ class InputMetadata:
         out_cache_cont_end=None,
         top_logprobs_nums=None,
         return_logprob=False,
+        logits_processors=None,
     ):
         batch_size = len(req_pool_indices)
         start_loc = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
@@ -200,13 +216,14 @@ class InputMetadata:
             other_kv_index=other_kv_index,
             return_logprob=return_logprob,
             top_logprobs_nums=top_logprobs_nums,
+            logits_processors=logits_processors,
         )
 
         if forward_mode == ForwardMode.EXTEND:
             ret.init_extend_args()
 
         if global_server_args_dict.get("enable_flashinfer", False):
-            ret.init_flashinfer_args(tp_size)
+            ret.init_flashinfer_args(model_runner, tp_size)
 
         return ret
 
@@ -230,6 +247,10 @@ class ModelRunner:
         self.nccl_port = nccl_port
         self.server_args = server_args
 
+        # following two dtypes are modified in load_model()
+        self.torch_dtype = torch.bfloat16
+        self.triton_dtype = triton.language.bfloat16
+
         global global_server_args_dict
         global_server_args_dict = {
             "enable_flashinfer": server_args.enable_flashinfer,
@@ -240,13 +261,16 @@ class ModelRunner:
         logger.info(f"[gpu_id={self.gpu_id}] Set cuda device.")
         torch.cuda.set_device(self.gpu_id)
         logger.info(f"[gpu_id={self.gpu_id}] Init nccl begin.")
-        torch.distributed.init_process_group(
+
+        init_distributed_environment(
             backend="nccl",
             world_size=self.tp_size,
             rank=self.tp_rank,
-            init_method=f"tcp://127.0.0.1:{self.nccl_port}",
+            distributed_init_method=f"tcp://127.0.0.1:{self.nccl_port}",
         )
+
         initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
+        
         total_gpu_memory = get_available_gpu_memory(
             self.gpu_id, distributed=self.tp_size > 1
         )
@@ -259,7 +283,8 @@ class ModelRunner:
                 )
 
         self.load_model()
-        self.init_memory_pool(total_gpu_memory)
+        self.init_memory_pool(total_gpu_memory, self.torch_dtype)
+
         self.is_multimodal_model = is_multimodal_model(self.model_config)
 
     def load_model(self):
@@ -267,6 +292,51 @@ class ModelRunner:
             f"[gpu_id={self.gpu_id}] Load weight begin. "
             f"Avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
+
+        # Load weights
+        quant_cfg = getattr(
+            self.model_config.hf_config, "quantization_config", None
+        )
+
+        import triton
+
+        model_type = getattr(
+            self.model_config.hf_config, "model_type", None
+        )
+
+        # quant models can only operate in  float16 and non-quant has no such limitation
+        if quant_cfg is not None or model_type == "llava":  # llava only supports float16.
+            self.torch_dtype = torch.float16
+            self.triton_dtype = triton.language.float16
+        else:
+            self.torch_dtype = torch.bfloat16
+            self.triton_dtype = triton.language.bfloat16
+
+        token_attention.REDUCE_TRITON_TYPE = self.triton_dtype
+        token_attention.REDUCE_TORCH_TYPE = self.torch_dtype
+
+        # load quant linear_method
+        if quant_cfg is not None:
+            quant_method = quant_cfg.get("quant_method", "").lower()
+            is_method_gptq = quant_method == "gptq"
+            # compat: some hf models use quant_method=marlin
+            is_method_marlin = quant_method == "marlin"
+            # compat: autogptq >0.7.1 use checkpoint_format: str
+            # compat: autogptq <=0.71 is_marlin_format: bool
+            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
+                                or quant_cfg.get("is_marlin_format"))
+
+            # Use marlin if the GPTQ model is serialized in marlin format.
+            if is_method_marlin or (is_method_gptq and is_format_marlin):
+                quant_method = "marlin"
+
+            quant_config_class = QUANTIONCONFIG_MAPPING.get(quant_method)
+
+            if quant_config_class is None:
+                raise ValueError(f"Unsupported quantization method: {quant_method}")
+
+            quant_config = quant_config_class.from_config(quant_cfg)
+            logger.info(f"quant_config: {quant_config}")
 
         device_config = DeviceConfig()
         load_config = LoadConfig(load_format=self.server_args.load_format)
@@ -276,7 +346,7 @@ class ModelRunner:
             tokenizer=None,
             tokenizer_mode=None,
             trust_remote_code=self.server_args.trust_remote_code,
-            dtype=torch.float16,
+            dtype=self.torch_dtype,
             seed=42,
             skip_tokenizer_init=True,
         )
@@ -291,6 +361,7 @@ class ModelRunner:
             vision_language_config=None,
             parallel_config=None,
             scheduler_config=None,
+            cache_config=None,
         )
         logger.info(
             f"[gpu_id={self.gpu_id}] Load weight end. "
@@ -311,7 +382,7 @@ class ModelRunner:
         max_num_token = int(rest_memory * (1 << 30) // cell_size)
         return max_num_token
 
-    def init_memory_pool(self, total_gpu_memory):
+    def init_memory_pool(self, total_gpu_memory, dtype=torch.float16):
         self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
 
         if self.max_total_num_tokens <= 0:
@@ -325,8 +396,8 @@ class ModelRunner:
         )
         self.token_to_kv_pool = TokenToKVPool(
             self.max_total_num_tokens,
-            dtype=torch.float16,
-            head_num=self.model_config.num_key_value_heads // self.tp_size,
+            dtype=dtype,
+            head_num=self.model_config.get_num_kv_heads(self.tp_size),
             head_dim=self.model_config.head_dim,
             layer_num=self.model_config.num_hidden_layers,
         )
@@ -348,6 +419,7 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
+            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -366,6 +438,7 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
+            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -386,6 +459,7 @@ class ModelRunner:
             out_cache_cont_end=batch.out_cache_cont_end,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
+            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -404,6 +478,7 @@ class ModelRunner:
             out_cache_loc=batch.out_cache_loc,
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
+            logits_processors=batch.custom_logits_processors(),
         )
         return self.model.forward(
             batch.input_ids,
@@ -447,6 +522,10 @@ def import_model_classes():
 
 def load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
     model_arch_name_to_cls = import_model_classes()
+
+    if model_arch == "ChatGLMModel":
+        model_arch = "ChatGLMForCausalLM"
+
     if model_arch not in model_arch_name_to_cls:
         raise ValueError(
             f"Unsupported architectures: {model_arch}. "
