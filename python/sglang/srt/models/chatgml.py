@@ -8,6 +8,7 @@ import torch
 from peft import LoraConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.managers.controller.model_runner import InputMetadata
+from sglang.srt.layers.logits_processor import LogitsProcessor
 from torch import nn
 from torch.nn import LayerNorm
 
@@ -18,7 +19,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -29,7 +29,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
-
 
 
 
@@ -348,7 +347,7 @@ class ChatGLMForCausalLM(nn.Module):
                                                8192)
         self.transformer = ChatGLMModel(config, cache_config, quant_config)
         self.lm_head = self.transformer.output_layer
-        self.logits_processor = LogitsProcessor(config.padded_vocab_size)
+        self.logits_processor = LogitsProcessor(config)
         self.sampler = Sampler()
 
     def forward(
