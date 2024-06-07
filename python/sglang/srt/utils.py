@@ -32,9 +32,7 @@ from packaging import version as pkg_version
 from starlette.middleware.base import BaseHTTPMiddleware
 import asyncio
 
-
 logger = logging.getLogger(__name__)
-
 
 show_time_cost = False
 time_infos = {}
@@ -155,10 +153,10 @@ def is_port_available(port):
 
 
 def allocate_init_ports(
-    port: Optional[int] = None,
-    additional_ports: Optional[List[int]] = None,
-    tp_size: int = 1,
-    dp_size: int = 1,
+        port: Optional[int] = None,
+        additional_ports: Optional[List[int]] = None,
+        tp_size: int = 1,
+        dp_size: int = 1,
 ):
     """Allocate ports for all connections."""
     if additional_ports:
@@ -272,7 +270,7 @@ def is_multimodal_model(model):
     if isinstance(model, ModelConfig):
         model_path = model.path.lower()
         return (
-            "llava" in model_path or "yi-vl" in model_path or "llava-next" in model_path
+                "llava" in model_path or "yi-vl" in model_path or "llava-next" in model_path
         )
 
     raise ValueError("unrecognized type")
@@ -300,14 +298,14 @@ def decode_video_base64(video_base64):
         while i < len(video_bytes) - 7:  # Adjusted for the length of the PNG signature
             # Check if we found the start of a PNG file
             if (
-                video_bytes[i] == 0x89
-                and video_bytes[i + 1] == 0x50
-                and video_bytes[i + 2] == 0x4E
-                and video_bytes[i + 3] == 0x47
-                and video_bytes[i + 4] == 0x0D
-                and video_bytes[i + 5] == 0x0A
-                and video_bytes[i + 6] == 0x1A
-                and video_bytes[i + 7] == 0x0A
+                    video_bytes[i] == 0x89
+                    and video_bytes[i + 1] == 0x50
+                    and video_bytes[i + 2] == 0x4E
+                    and video_bytes[i + 3] == 0x47
+                    and video_bytes[i + 4] == 0x0D
+                    and video_bytes[i + 5] == 0x0A
+                    and video_bytes[i + 6] == 0x1A
+                    and video_bytes[i + 7] == 0x0A
             ):
                 img_starts.append(i)
                 i += 8  # Skip the PNG signature
@@ -317,7 +315,7 @@ def decode_video_base64(video_base64):
         # Find each JPEG start (0xFFD8) to isolate images
         i = 0
         while (
-            i < len(video_bytes) - 1
+                i < len(video_bytes) - 1
         ):  # Adjusted for the length of the JPEG SOI signature
             # Check if we found the start of a JPEG file
             if video_bytes[i] == 0xFF and video_bytes[i + 1] == 0xD8:
@@ -493,6 +491,18 @@ def assert_pkg_version(pkg: str, min_version: str):
         )
 
 
+import multiprocessing as mp
+import queue
+
+
+def flush_queue(q: mp.Queue):
+    while True:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            break
+
+
 API_KEY_HEADER_NAME = "X-API-Key"
 
 
@@ -511,4 +521,3 @@ class APIKeyValidatorMiddleware(BaseHTTPMiddleware):
             )
         response = await call_next(request)
         return response
-

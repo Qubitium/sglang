@@ -6,7 +6,7 @@ import threading
 from typing import List, Callable
 
 import uvloop
-import zmq
+# import zmq
 
 from sglang.global_config import global_config
 from sglang.srt.managers.controller.tp_worker import ModelTpClient
@@ -29,6 +29,7 @@ class DataParallelWorkerThread(threading.Thread):
         request_queue: queue.Queue,
         detokenizer_port: int,
         step_func: Callable,
+        detokenzier_chan,
     ):
         super(DataParallelWorkerThread, self).__init__()
         self.worker_id = worker_id
@@ -36,9 +37,7 @@ class DataParallelWorkerThread(threading.Thread):
         self.liveness = True
         self.request_dependency_delay = global_config.request_dependency_delay
 
-        context = zmq.asyncio.Context()
-        self.send_to_detokenizer = context.socket(zmq.PUSH)
-        self.send_to_detokenizer.connect(f"tcp://127.0.0.1:{detokenizer_port}")
+        self.detokenzier_chan = detokenzier_chan
 
         self.step = step_func
 
@@ -66,7 +65,7 @@ class DataParallelWorkerThread(threading.Thread):
                 print(f"out_pyobjs: type: {type(out_pyobjs[0])}")
 
             for obj in out_pyobjs:
-                self.send_to_detokenizer.send_pyobj(obj)
+                self.detokenzier_chan.put_nowait(obj)
 
             # async sleep for receiving the subsequent request and avoiding cache miss
             if len(out_pyobjs) != 0:
@@ -95,6 +94,7 @@ def start_data_parallel_worker(
     model_overide_args,
     gpu_ids: List[int],
     worker_id: int,
+    detokenzier_chan,
 ):
     model_tp_client = ModelTpClient(
         gpu_ids,
@@ -107,6 +107,7 @@ def start_data_parallel_worker(
         request_queue=queue.Queue(),
         detokenizer_port=port_args.detokenizer_port,
         step_func=model_tp_client.step,
+        detokenzier_chan=detokenzier_chan,
     )
     worker_thread.start()
     return worker_thread

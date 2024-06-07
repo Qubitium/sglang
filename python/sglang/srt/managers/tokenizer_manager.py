@@ -180,14 +180,15 @@ class TokenizerManager:
             self.rid_to_state[rid] = state
 
             while True:
-                try:
-                    # print(f"tokenizer generate request single wait for event rid: {rid}")
-                    await asyncio.wait_for(event.wait(), timeout=4)
-                except asyncio.TimeoutError:
-                    if request is not None and await request.is_disconnected():
-                        self.abort_request(rid)
-                        raise ValueError(f"Abort request {rid}")
-                    continue
+                await event.wait()
+                # try:
+                #     print(f"tokenizer generate request single wait for event rid: {rid}")
+                #     await asyncio.wait_for(event.wait(), timeout=4)
+                # except asyncio.TimeoutError:
+                #     if request is not None and await request.is_disconnected():
+                #         self.abort_request(rid)
+                #         raise ValueError(f"Abort request {rid}")
+                #     continue
 
                 out = self.convert_logprob_style(
                     state.out_list[-1],
