@@ -129,9 +129,6 @@ class TokenizerManager:
         obj.post_init()
         is_single = obj.is_single
         if is_single:
-            self.pending += 1
-            # print(f"PENDING {self.pending}")
-            # print(f"tokenizer generate_request single request")
             rid = obj.rid
 
             if obj.input_ids is None:
@@ -180,6 +177,9 @@ class TokenizerManager:
             event = asyncio.Event()
             state = ReqState([], False, event)
             self.rid_to_state[rid] = state
+            self.pending += 1
+            # print(f"PENDING {self.pending}")
+            # print(f"tokenizer generate_request single request")
 
             while True:
                 await event.wait()
@@ -336,16 +336,16 @@ class TokenizerManager:
 
     def create_abort_task(self, obj: GenerateReqInput):
         # Abort the request if the client is disconnected.
-        async def abort_request():
-            await asyncio.sleep(3)
-            if obj.is_single:
-                self.abort_request(obj.rid)
-            else:
-                for rid in obj.rids:
-                    self.abort_request(rid)
+        # async def abort_request():
+        #     await asyncio.sleep(3)
+        #     if obj.is_single:
+        #         self.abort_request(obj.rid)
+        #     else:
+        #         for rid in obj.rids:
+        #             self.abort_request(rid)
 
         background_tasks = BackgroundTasks()
-        background_tasks.add_task(abort_request)
+        # background_tasks.add_task(abort_request)
         return background_tasks
 
     # def create_handle_loop(self):
