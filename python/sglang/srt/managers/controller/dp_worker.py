@@ -66,10 +66,6 @@ class DataParallelWorkerThread(threading.Thread):
                 kill_parent_process()
                 return
 
-            # TODO remove code after testing in DP
-            if len(out_pyobjs) > 0:
-                print(f"out_pyobjs: type: {type(out_pyobjs[0])}")
-
             for obj in out_pyobjs:
                 self.detokenzier_chan.put_nowait(obj)
 
