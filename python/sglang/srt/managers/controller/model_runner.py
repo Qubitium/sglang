@@ -262,8 +262,7 @@ class ModelRunner:
         torch.cuda.set_device(self.gpu_id)
         logger.info(f"[gpu_id={self.gpu_id}] Init nccl begin.")
 
-        # After calling this method, an error will occur in 2X4090.
-        # monkey_patch_vllm_p2p_access_check()
+        monkey_patch_vllm_p2p_access_check(self.gpu_id)
 
         init_distributed_environment(
             backend="nccl",
