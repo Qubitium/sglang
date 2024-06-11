@@ -1,4 +1,7 @@
-"""SRT: SGLang Runtime"""
+"""
+The entry point of inference server.
+SRT = SGLang Runtime.
+"""
 
 import asyncio
 import dataclasses
@@ -10,8 +13,7 @@ import sys
 import threading
 import time
 from http import HTTPStatus
-from typing import Optional
-import uvicorn
+from typing import Optional, Dict
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -20,6 +22,7 @@ mp.set_start_method('spawn', force=True)
 import aiohttp
 import psutil
 import requests
+import uvicorn
 import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -168,7 +171,6 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
         server_args.dp_size,
     )
 
-    # Init local models port args
     ports = server_args.additional_ports
     tp = server_args.tp_size
     model_port_args = []
@@ -248,20 +250,21 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
 
         # Send a warmup request
         try:
-            res = requests.post(
-                url + "/generate",
-                json={
-                    "text": "The capital city of France is",
-                    "sampling_params": {
-                        "temperature": 0,
-                        "max_new_tokens": 16,
+            for _ in range(server_args.dp_size):
+                res = requests.post(
+                    url + "/generate",
+                    json={
+                        "text": "The capital city of France is",
+                        "sampling_params": {
+                            "temperature": 0,
+                            "max_new_tokens": 16,
+                        },
                     },
-                },
-                headers=headers,
-                timeout=600,
-            )
-            assert res.status_code == 200
-        except Exception as e:
+                    headers=headers,
+                    timeout=600,
+                )
+                assert res.status_code == 200
+        except Exception:
             if pipe_finish_writer is not None:
                 pipe_finish_writer.send(get_exception_traceback())
             print(f"Initialization failed. warmup error: {e}")
@@ -289,6 +292,12 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
 
 
 class Runtime:
+    """
+    A wrapper for the server.
+    This is used for launching the server in a python program without
+    using the commond line interface.
+    """
+
     def __init__(
         self,
         tokenizer_init_chan: mp.Queue = None,
@@ -363,7 +372,7 @@ class Runtime:
     async def add_request(
             self,
             prompt: str,
-            sampling_params,
+            sampling_params: Dict,
     ) -> None:
         json_data = {
             "text": prompt,

@@ -1,3 +1,5 @@
+"""A tensor parallel worker."""
+
 import asyncio
 import logging
 import time
@@ -19,7 +21,7 @@ from sglang.srt.managers.io_struct import (
     FlushCacheReq,
     TokenizedGenerateReqInput,
 )
-from sglang.srt.managers.controller.infer_batch import Batch, FINISH_ABORT, ForwardMode, Req
+from sglang.srt.managers.controller.infer_batch import BaseFinishReason, Batch, FINISH_ABORT, ForwardMode, Req
 from sglang.srt.managers.controller.model_runner import ModelRunner
 from sglang.srt.managers.controller.radix_cache import RadixCache
 from sglang.srt.managers.controller.schedule_heuristic import ScheduleHeuristic
@@ -34,9 +36,8 @@ from sglang.srt.utils import (
 )
 from sglang.utils import get_exception_traceback
 
-from sglang.srt.managers.controller.infer_batch import BaseFinishReason
 
-logger = logging.getLogger("srt.model_tp")
+logger = logging.getLogger("srt.tp_worker")
 
 class ModelTpServer:
     def __init__(
@@ -112,7 +113,10 @@ class ModelTpServer:
             f"context_len={self.model_config.context_len}, "
         )
         if self.tp_rank == 0:
-            logger.info(f"server_args: {server_args.print_mode_args()}")
+            logger.info(
+                f"[gpu_id={self.gpu_id}] "
+                f"server_args: {server_args.print_mode_args()}"
+            )
 
         # Init cache
         self.tree_cache = RadixCache(
@@ -185,7 +189,8 @@ class ModelTpServer:
             # Forward
             self.forward_step()
         except Exception:
-            logger.error("Exception in ModelTpClient:\n" + get_exception_traceback())
+            logger.error("Exception in ModelTpServer:\n" + get_exception_traceback())
+            raise
 
         # Return results
         ret = self.out_pyobjs
@@ -227,7 +232,7 @@ class ModelTpServer:
                             self.num_generated_tokens = 0
                             self.last_stats_tic = time.time()
                             logger.info(
-                                f"[gpu_id={self.gpu_id}] "
+                                f"[gpu_id={self.gpu_id}] Decode batch. "
                                 f"#running-req: {len(self.running_batch.reqs)}, "
                                 f"#token: {num_used}, "
                                 f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
@@ -398,12 +403,13 @@ class ModelTpServer:
                 self.tree_cache_metrics["hit"] / self.tree_cache_metrics["total"]
             )
             logger.info(
-                f"new fill batch. #seq: {len(can_run_list)}. "
-                f"#cached_token: {hit_tokens}. "
-                f"#new_token: {new_batch_input_tokens}. "
-                f"#remaining_req: {len(self.forward_queue) - len(can_run_list)}. "
-                f"#running_req: {running_req}. "
-                f"tree_cache_hit_rate: {100.0 * tree_cache_hit_rate:.2f}%. "
+                f"[gpu_id={self.gpu_id}] Prefil batch. "
+                f"#new-seq: {len(can_run_list)}, "
+                f"#new-token: {new_batch_input_tokens}, "
+                f"#cached-token: {hit_tokens}, "
+                f"cache hit rate: {100.0 * tree_cache_hit_rate:.2f}%, "
+                f"#running-req: {running_req}, "
+                f"#queue-req: {len(self.forward_queue) - len(can_run_list)}"
             )
             # logger.debug(
             #    f"fsm_cache_hit_rate: {100.0 * self.regex_fsm_cache.get_cache_hit_rate():.2f}%. "

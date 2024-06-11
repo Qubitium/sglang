@@ -1,3 +1,4 @@
+"""ModelRunner runs the forward passes of the models."""
 import importlib
 import importlib.resources
 import logging
@@ -11,7 +12,6 @@ from sglang.srt.layers import token_attention
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
-from vllm.distributed import init_distributed_environment
 
 from typing import List, Optional, Type
 
@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from vllm.config import DeviceConfig, LoadConfig
 from vllm.config import ModelConfig as VllmModelConfig
-from vllm.distributed import initialize_model_parallel
+from vllm.distributed import initialize_model_parallel, init_distributed_environment
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import ModelRegistry
 
@@ -28,7 +28,7 @@ from vllm.model_executor.models import ModelRegistry
 from sglang.srt.managers.controller.infer_batch import Batch, ForwardMode
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_available_gpu_memory, is_multimodal_model
+from sglang.srt.utils import get_available_gpu_memory, is_multimodal_model, monkey_patch_vllm_p2p_access_check
 
 from sglang.srt.sampling_params import CustomLogitsProcessor
 
@@ -262,10 +262,13 @@ class ModelRunner:
         torch.cuda.set_device(self.gpu_id)
         logger.info(f"[gpu_id={self.gpu_id}] Init nccl begin.")
 
+        monkey_patch_vllm_p2p_access_check()
+
         init_distributed_environment(
             backend="nccl",
             world_size=self.tp_size,
             rank=self.tp_rank,
+            local_rank=self.gpu_id,
             distributed_init_method=f"tcp://127.0.0.1:{self.nccl_port}",
         )
 
@@ -290,7 +293,7 @@ class ModelRunner:
     def load_model(self):
         logger.info(
             f"[gpu_id={self.gpu_id}] Load weight begin. "
-            f"Avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
+            f"avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
 
         # Load weights
@@ -365,8 +368,8 @@ class ModelRunner:
         )
         logger.info(
             f"[gpu_id={self.gpu_id}] Load weight end. "
-            f"Type={type(self.model).__name__}. "
-            f"Avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
+            f"type={type(self.model).__name__}, "
+            f"avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
 
     def profile_max_num_token(self, total_gpu_memory):
@@ -403,7 +406,7 @@ class ModelRunner:
         )
         logger.info(
             f"[gpu_id={self.gpu_id}] Memory pool end. "
-            f"Avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
+            f"avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
 
     @torch.inference_mode()

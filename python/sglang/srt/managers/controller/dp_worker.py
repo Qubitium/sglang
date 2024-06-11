@@ -1,4 +1,5 @@
 """A data parallel worker thread."""
+
 import asyncio
 import logging
 import queue
@@ -12,6 +13,7 @@ from sglang.global_config import global_config
 from sglang.srt.managers.controller.tp_worker import ModelTpClient
 from sglang.srt.managers.io_struct import BatchTokenIDOut
 from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.utils import kill_parent_process
 from sglang.utils import get_exception_traceback
 
 
@@ -59,6 +61,10 @@ class DataParallelWorkerThread(threading.Thread):
                     f"{get_exception_traceback()}"
                 )
                 self.liveness = False
+                # Crash the whole server when there are any errors.
+                # TODO(lianmin): make this an option.
+                kill_parent_process()
+                return
 
             # TODO remove code after testing in DP
             if len(out_pyobjs) > 0:
@@ -69,7 +75,6 @@ class DataParallelWorkerThread(threading.Thread):
 
             # async sleep for receiving the subsequent request and avoiding cache miss
             if len(out_pyobjs) != 0:
-                # TODO remove comment after testing in DP
                 has_finished = any([obj.finished_reason is not None for obj in out_pyobjs])
                 if has_finished:
                     await asyncio.sleep(self.request_dependency_delay)

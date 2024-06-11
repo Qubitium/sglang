@@ -262,10 +262,9 @@ class GemmaForCausalLM(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        # vllm.model_executor.model_loader.get_model() requires this keyword parameter
-        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
     ) -> None:
         del lora_config  # Unused.
         super().__init__()

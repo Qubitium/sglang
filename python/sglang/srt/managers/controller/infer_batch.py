@@ -1,4 +1,5 @@
 """Meta data for requests and batches"""
+
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import List, Optional, Any
@@ -99,11 +100,10 @@ class Req:
         self.sampling_params: SamplingParams = None
         self.stream = False
 
-        # Check finish
         self.tokenizer = None
 
-        # finished reason is a nullable object that covers all finish conditions
-        self.finished_reason: [BaseFinishReason] = None
+        # Check finish
+        self.finished_reason = None
 
         # Prefix info
         self.extend_input_len = 0
@@ -128,7 +128,7 @@ class Req:
         self.regex_fsm_state = 0
         self.jump_forward_map = None
 
-    # has request reached finished condition
+    # whether request reached finished condition
     def finished(self) -> bool:
         return self.finished_reason is not None
 

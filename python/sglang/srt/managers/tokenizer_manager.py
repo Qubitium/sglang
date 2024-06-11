@@ -1,10 +1,11 @@
+"""TokenizerManager is a process that tokenizes the text."""
 import asyncio
 import concurrent.futures
 import dataclasses
 import logging
 import multiprocessing as mp
 import os
-from typing import List
+from typing import List, Dict
 import numpy as np
 import transformers
 import uvloop
@@ -24,6 +25,7 @@ from sglang.srt.managers.io_struct import (
     GenerateReqInput,
     TokenizedGenerateReqInput,
 )
+from sglang.srt.managers.io_struct import BatchTokenIDOut
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
@@ -93,7 +95,7 @@ class TokenizerManager:
             )
 
         self.to_create_loop = True
-        self.rid_to_state = {}  # Dict[str -> ReqState]
+        self.rid_to_state: Dict[str, ReqState] = {}
         self.decoder_task = None
 
     async def start(self):
@@ -213,9 +215,13 @@ class TokenizerManager:
                         # print(f"PENDING size: {self.pending}")
 
                     del self.rid_to_state[rid]
+
                     yield out
+
                     break
+
                 event.clear()
+
                 yield out
         else:
             # print(f"tokenizer generate_request multiple request")
@@ -328,7 +334,7 @@ class TokenizerManager:
         req = AbortReq(rid)
         self.send_to_router.send_pyobj(req)
 
-    def create_abort_task(self, obj):
+    def create_abort_task(self, obj: GenerateReqInput):
         # Abort the request if the client is disconnected.
         async def abort_request():
             await asyncio.sleep(3)

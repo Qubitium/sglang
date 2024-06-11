@@ -5,13 +5,17 @@ import multiprocessing as mp
 import os
 import queue
 import psutil
+import time
 
 
 from sglang.global_config import global_config
 from sglang.srt.managers.controller.tp_worker import ModelTpClient
 from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.utils import kill_parent_process
 from sglang.utils import get_exception_traceback
 from sglang.srt.utils import flush_queue
+
+logger = logging.getLogger("srt.controller")
 
 
 class ControllerSingle:
@@ -97,21 +101,11 @@ def start_controller_process(
 
     startup_chan.put_nowait("init ok")
 
-    # blocking
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         loop.run_until_complete(controller.loop_for_forward())
-    except KeyboardInterrupt:
-        print("Caught KeyboardInterrupt, terminating sglang process")
-        try:
-            cur_process = psutil.Process(os.getpid())
-            parent = cur_process.parent()
-        except psutil.NoSuchProcess:
-            return
-        children = cur_process.children(recursive=True)
-        for child in children:
-            child.kill()
-        psutil.wait_procs(children, timeout=5)
-        parent.kill()
-        parent.wait(timeout=5)
+    except Exception:
+        logger.error("Exception in ControllerSingle:\n" + get_exception_traceback())
+    finally:
+        kill_parent_process()
