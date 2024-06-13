@@ -13,14 +13,14 @@ import os
 import psutil
 
 from sglang.global_config import global_config
+from sglang.srt.managers.controller.dp_worker import (
+    DataParallelWorkerThread,
+    start_data_parallel_worker,
+)
 from sglang.srt.managers.io_struct import (
     AbortReq,
     FlushCacheReq,
     TokenizedGenerateReqInput,
-)
-from sglang.srt.managers.controller.dp_worker import (
-    DataParallelWorkerThread,
-    start_data_parallel_worker,
 )
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.utils import get_exception_traceback

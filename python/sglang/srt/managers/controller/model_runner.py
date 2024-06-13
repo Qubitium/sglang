@@ -1,4 +1,5 @@
 """ModelRunner runs the forward passes of the models."""
+
 import importlib
 import importlib.resources
 import logging
@@ -20,7 +21,7 @@ import torch
 import torch.nn as nn
 from vllm.config import DeviceConfig, LoadConfig
 from vllm.config import ModelConfig as VllmModelConfig
-from vllm.distributed import initialize_model_parallel, init_distributed_environment
+from vllm.distributed import init_distributed_environment, initialize_model_parallel
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import ModelRegistry
 
@@ -28,7 +29,11 @@ from vllm.model_executor.models import ModelRegistry
 from sglang.srt.managers.controller.infer_batch import Batch, ForwardMode
 from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_available_gpu_memory, is_multimodal_model, monkey_patch_vllm_p2p_access_check
+from sglang.srt.utils import (
+    get_available_gpu_memory,
+    is_multimodal_model,
+    monkey_patch_vllm_p2p_access_check,
+)
 
 from sglang.srt.sampling_params import CustomLogitsProcessor
 
@@ -261,9 +266,7 @@ class ModelRunner:
         logger.info(f"[gpu_id={self.gpu_id}] Set cuda device.")
         torch.cuda.set_device(self.gpu_id)
         logger.info(f"[gpu_id={self.gpu_id}] Init nccl begin.")
-
         monkey_patch_vllm_p2p_access_check(self.gpu_id)
-
         init_distributed_environment(
             backend="nccl",
             world_size=self.tp_size,
@@ -515,20 +518,28 @@ def import_model_classes():
             module = importlib.import_module(name)
             if hasattr(module, "EntryClass"):
                 entry = module.EntryClass
-                if isinstance(entry, list): # To support multiple model classes in one module
+                if isinstance(
+                    entry, list
+                ):  # To support multiple model classes in one module
                     for tmp in entry:
                         model_arch_name_to_cls[tmp.__name__] = tmp
                 else:
                     model_arch_name_to_cls[entry.__name__] = entry
+
+            # compat: some models such as chatglm has incorrect class set in config.json
+            # usage: [ tuple("From_Entry_Class_Name": EntryClass), ]
+            if hasattr(module, "EntryClassRemapping") and isinstance(
+                module.EntryClassRemapping, list
+            ):
+                for remap in module.EntryClassRemapping:
+                    if isinstance(remap, tuple) and len(remap) == 2:
+                        model_arch_name_to_cls[remap[0]] = remap[1]
+
     return model_arch_name_to_cls
 
 
 def load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
     model_arch_name_to_cls = import_model_classes()
-
-    if model_arch == "ChatGLMModel":
-        model_arch = "ChatGLMForCausalLM"
-
     if model_arch not in model_arch_name_to_cls:
         raise ValueError(
             f"Unsupported architectures: {model_arch}. "

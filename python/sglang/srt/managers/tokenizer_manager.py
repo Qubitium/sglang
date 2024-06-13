@@ -1,11 +1,13 @@
 """TokenizerManager is a process that tokenizes the text."""
+
 import asyncio
 import concurrent.futures
 import dataclasses
 import logging
 import multiprocessing as mp
 import os
-from typing import List, Dict
+from typing import Dict, List
+
 import numpy as np
 import transformers
 import uvloop
@@ -25,7 +27,6 @@ from sglang.srt.managers.io_struct import (
     GenerateReqInput,
     TokenizedGenerateReqInput,
 )
-from sglang.srt.managers.io_struct import BatchTokenIDOut
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
