@@ -320,6 +320,10 @@ class Batch:
     def is_empty(self):
         return len(self.reqs) == 0
 
+    # whether batch has at least 1 streaming request
+    def has_stream(self) -> bool:
+        return any(r.stream for r in self.reqs)
+
     def custom_logits_processors(self) -> List[List[CustomLogitsProcessor]]:
         return [r.sampling_params.logits_processors for r in self.reqs]
 
