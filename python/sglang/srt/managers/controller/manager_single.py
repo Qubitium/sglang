@@ -14,6 +14,7 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import kill_parent_process
 from sglang.utils import get_exception_traceback
 from sglang.srt.utils import flush_queue
+from sglang.srt.managers.io_struct import AbortReq
 
 logger = logging.getLogger("srt.controller")
 
@@ -44,9 +45,15 @@ class ControllerSingle:
 
             if idle:
                 # print("forward IDLE WAIT")
-                next_step_input.append(self.router_chan.get())
-                idle = False
-                # print("forward IDLE WAIT complete")
+                recv_obj = self.router_chan.get()
+                next_step_input.append(recv_obj)
+
+                if isinstance(recv_obj, AbortReq):
+                    pass
+                    # print("Received AbortReq, forward IDLE WAIT")
+                else:
+                    idle = False
+                    # print("forward IDLE WAIT complete")
             else:
                 pass
                 # print("CPU SPIN LOOP")
