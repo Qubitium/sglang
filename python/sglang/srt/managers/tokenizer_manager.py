@@ -333,6 +333,11 @@ class TokenizerManager:
         # self.send_to_router.send_pyobj(req)
         asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, req)
 
+        # Pause the loop in ControllerSingle.loop_for_forward() to avoid wasting CPU resources.
+        self.pending = 0
+        # print("Abort request, signal to IDLE Chan!")
+        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
+
     def create_abort_task(self, obj: GenerateReqInput):
         # Abort the request if the client is disconnected.
         async def abort_request():
