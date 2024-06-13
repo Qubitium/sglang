@@ -366,6 +366,8 @@ class TokenizerManager:
             assert isinstance(recv_obj, BatchTokenIDOut)
             # print(f"detokenizer detokenizer_chan get done: {recv_obj}")
 
+            # The following code is from handle_loop() in detokenizer_manager.py
+
             # TODO(lmzheng): handle skip_special_tokens/spaces_between_special_tokens per request
             def batch_decode_surr():
                 return self.tokenizer.batch_decode(recv_obj.surr_output_ids,
@@ -391,6 +393,8 @@ class TokenizerManager:
                     pos = output_strs[i].find(recv_obj.finished_reason[i].matched)
                     if pos != -1:
                         output_strs[i] = output_strs[i][:pos]
+
+            # The following code is from handle_loop() in tokenizer_manager.py
 
             # print(f"detokenizer tokenizer_chan put",recv_obj.rids)
             output = BatchStrOut(
