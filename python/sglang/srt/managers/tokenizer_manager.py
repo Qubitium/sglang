@@ -182,15 +182,14 @@ class TokenizerManager:
             # print(f"tokenizer generate_request single request")
 
             while True:
-                await event.wait()
-                # try:
-                #     print(f"tokenizer generate request single wait for event rid: {rid}")
-                #     await asyncio.wait_for(event.wait(), timeout=4)
-                # except asyncio.TimeoutError:
-                #     if request is not None and await request.is_disconnected():
-                #         self.abort_request(rid)
-                #         raise ValueError(f"Abort request {rid}")
-                #     continue
+                # print(f"tokenizer generate request single wait for event rid: {rid}")
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=4)
+                except asyncio.TimeoutError:
+                    if request is not None and await request.is_disconnected():
+                        self.abort_request(rid)
+                        raise ValueError(f"Abort request {rid}")
+                    continue
 
                 out = self.convert_logprob_style(
                     state.out_list[-1],
@@ -284,15 +283,14 @@ class TokenizerManager:
                 rid = obj.rid[i]
                 state = self.rid_to_state[rid]
                 # print("tokenizer generate request multiple wait for event")
-                await state.event.wait()
-                # try:
-                #     await asyncio.wait_for(state.event.wait(), timeout=4)
-                #     break
-                # except asyncio.TimeoutError:
-                #     if request is not None and await request.is_disconnected():
-                #         for rid in obj.rid:
-                #             self.abort_request(rid)
-                #         raise ValueError(f"Abort request {rid}")
+                try:
+                    await asyncio.wait_for(state.event.wait(), timeout=4)
+                    break
+                except asyncio.TimeoutError:
+                    if request is not None and await request.is_disconnected():
+                        for rid in obj.rid:
+                            self.abort_request(rid)
+                        raise ValueError(f"Abort request {rid}")
 
                 # print("tokenizer generate request multiple wait for event complete")
                 output_list.append(
@@ -325,27 +323,28 @@ class TokenizerManager:
     async def flush_cache(self):
         flush_cache_req = FlushCacheReq()
         # self.send_to_router.send_pyobj(flush_cache_req)
-        self.router_chan.put_nowait(flush_cache_req)
+        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, flush_cache_req)
 
     def abort_request(self, rid):
         if rid not in self.rid_to_state:
             return
         del self.rid_to_state[rid]
         req = AbortReq(rid)
-        self.send_to_router.send_pyobj(req)
+        # self.send_to_router.send_pyobj(req)
+        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, req)
 
     def create_abort_task(self, obj: GenerateReqInput):
         # Abort the request if the client is disconnected.
-        # async def abort_request():
-        #     await asyncio.sleep(3)
-        #     if obj.is_single:
-        #         self.abort_request(obj.rid)
-        #     else:
-        #         for rid in obj.rids:
-        #             self.abort_request(rid)
+        async def abort_request():
+            await asyncio.sleep(3)
+            if obj.is_single:
+                self.abort_request(obj.rid)
+            else:
+                for rid in obj.rids:
+                    self.abort_request(rid)
 
         background_tasks = BackgroundTasks()
-        # background_tasks.add_task(abort_request)
+        background_tasks.add_task(abort_request)
         return background_tasks
 
     # def create_handle_loop(self):
