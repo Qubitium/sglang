@@ -223,6 +223,10 @@ class ModelTpServer:
         else:
             # Run decode batch
             if self.running_batch is not None:
+                # TODO: hardcoded value here is never optimal.
+                #  1. We want to merge new requests into batch
+                #  2. This code wants to do at least 10 decode_steps before merging new requests
+                #  3. We need a healthy test of 1 and 2 and avoid using a static value here.
                 # Run a few decode batches continuously for reducing overhead
                 for _ in range(10):
                     self.num_generated_tokens += len(self.running_batch.reqs)
