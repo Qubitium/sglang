@@ -5,7 +5,7 @@ import logging
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Optional
 
 import rpyc
 import torch
@@ -318,7 +318,7 @@ class ModelTpServer:
         )
         self.forward_queue.append(req)
 
-    def get_new_fill_batch(self) -> Batch:
+    def get_new_fill_batch(self) -> Optional[Batch]:
         if (
             self.running_batch is not None
             and len(self.running_batch.reqs) > self.max_running_requests
