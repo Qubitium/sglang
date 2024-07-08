@@ -178,7 +178,6 @@ class ModelTpServer:
         self.new_token_ratio_recovery = global_config.new_token_ratio_recovery
 
     def exposed_step(self, recv_reqs):
-        print("STEP", recv_reqs)
         if self.tp_size * self.dp_size != 1:
             recv_reqs = obtain(recv_reqs)
 

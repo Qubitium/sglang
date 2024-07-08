@@ -73,7 +73,6 @@ class DetokenizerManager:
                     rids=recv_obj.rids,
                     output_strs=output_strs,
                     meta_info=recv_obj.meta_info,
-                    finished=recv_obj.finished_reason,
                     finished_reason=recv_obj.finished_reason,
                 )
             )
