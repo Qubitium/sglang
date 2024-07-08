@@ -32,6 +32,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     get_available_gpu_memory,
     is_multimodal_model,
+    monkey_patch_vllm_dummy_weight_loader,
     monkey_patch_vllm_p2p_access_check,
 )
 
@@ -47,7 +48,6 @@ global_server_args_dict = {}
 
 @dataclass
 class InputMetadata:
-    model_runner: "ModelRunner"
     forward_mode: ForwardMode
     batch_size: int
     total_num_tokens: int
@@ -78,75 +78,84 @@ class InputMetadata:
     kv_indptr: torch.Tensor = None
     kv_indices: torch.Tensor = None
     kv_last_page_len: torch.Tensor = None
-    prefill_wrapper = None
-    decode_wrapper = None
+    flashinfer_prefill_wrapper_ragged: "BatchPrefillWithRaggedKVCacheWrapper" = None
+    flashinfer_prefill_wrapper_paged: "BatchPrefillWithPagedKVCacheWrapper" = None
+    flashinfer_decode_wrapper: "BatchDecodeWithPagedKVCacheWrapper" = None
 
     logits_processors: Optional[List[List[CustomLogitsProcessor]]] = None
 
-    def init_flashinfer_args(self, model_runner, tp_size):
-        from flashinfer import (
-            BatchDecodeWithPagedKVCacheWrapper,
-            BatchPrefillWithPagedKVCacheWrapper,
-        )
+    def init_flashinfer_args(self, num_qo_heads, num_kv_heads, head_dim):
+        if (
+            self.forward_mode == ForwardMode.PREFILL
+            or self.forward_mode == ForwardMode.EXTEND
+        ):
+            paged_kernel_lens = self.prefix_lens
+            self.no_prefix = torch.all(self.prefix_lens == 0)
+        else:
+            paged_kernel_lens = self.seq_lens
 
         self.kv_indptr = torch.zeros(
             (self.batch_size + 1,), dtype=torch.int32, device="cuda"
         )
-        self.kv_indptr[1:] = torch.cumsum(self.seq_lens, dim=0)
+        self.kv_indptr[1:] = torch.cumsum(paged_kernel_lens, dim=0)
         self.kv_last_page_len = torch.ones(
             (self.batch_size,), dtype=torch.int32, device="cuda"
         )
         req_pool_indices_cpu = self.req_pool_indices.cpu().numpy()
-        seq_lens_cpu = self.seq_lens.cpu().numpy()
+        paged_kernel_lens_cpu = paged_kernel_lens.cpu().numpy()
         self.kv_indices = torch.cat(
             [
                 self.req_to_token_pool.req_to_token[
-                    req_pool_indices_cpu[i], : seq_lens_cpu[i]
+                    req_pool_indices_cpu[i], : paged_kernel_lens_cpu[i]
                 ]
                 for i in range(self.batch_size)
             ],
             dim=0,
         ).contiguous()
 
-        workspace_buffer = torch.empty(
-            32 * 1024 * 1024, dtype=torch.int8, device="cuda"
-        )
         if (
             self.forward_mode == ForwardMode.PREFILL
             or self.forward_mode == ForwardMode.EXTEND
         ):
+            # extend part
             self.qo_indptr = torch.zeros(
                 (self.batch_size + 1,), dtype=torch.int32, device="cuda"
             )
             self.qo_indptr[1:] = torch.cumsum(self.extend_seq_lens, dim=0)
-            self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                workspace_buffer, "NHD"
+
+            self.flashinfer_prefill_wrapper_ragged.end_forward()
+            self.flashinfer_prefill_wrapper_ragged.begin_forward(
+                self.qo_indptr,
+                self.qo_indptr.clone(),
+                num_qo_heads,
+                num_kv_heads,
+                head_dim,
             )
-            args = [
+
+            # cached part
+            self.flashinfer_prefill_wrapper_paged.end_forward()
+            self.flashinfer_prefill_wrapper_paged.begin_forward(
                 self.qo_indptr,
                 self.kv_indptr,
                 self.kv_indices,
                 self.kv_last_page_len,
-                self.model_runner.model_config.num_attention_heads // tp_size,
-                self.model_runner.model_config.num_key_value_heads // tp_size,
-                self.model_runner.model_config.head_dim,
-            ]
-
-            self.prefill_wrapper.begin_forward(*args)
-        else:
-            self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-                workspace_buffer, "NHD"
+                num_qo_heads,
+                num_kv_heads,
+                head_dim,
+                1,
             )
-            self.decode_wrapper.begin_forward(
+        else:
+            self.flashinfer_decode_wrapper.end_forward()
+            self.flashinfer_decode_wrapper.begin_forward(
                 self.kv_indptr,
                 self.kv_indices,
                 self.kv_last_page_len,
-                self.model_runner.model_config.num_attention_heads // tp_size,
-                self.model_runner.model_config.num_key_value_heads // tp_size,
-                self.model_runner.model_config.head_dim,
+                num_qo_heads,
+                num_kv_heads,
+                head_dim,
                 1,
-                "NONE",
-                model_runner.torch_dtype,
+                pos_encoding_mode="NONE",
+                data_type=self.token_to_kv_pool.kv_data[0].dtype,
             )
 
     def init_extend_args(self):
@@ -171,6 +180,9 @@ class InputMetadata:
         top_logprobs_nums=None,
         return_logprob=False,
         logits_processors=None,
+        flashinfer_prefill_wrapper_ragged=None,
+        flashinfer_prefill_wrapper_paged=None,
+        flashinfer_decode_wrapper=None,
     ):
         batch_size = len(req_pool_indices)
         start_loc = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
@@ -203,7 +215,6 @@ class InputMetadata:
             other_kv_index = None
 
         ret = cls(
-            model_runner=model_runner,
             forward_mode=forward_mode,
             batch_size=batch_size,
             total_num_tokens=total_num_tokens,
@@ -222,13 +233,20 @@ class InputMetadata:
             return_logprob=return_logprob,
             top_logprobs_nums=top_logprobs_nums,
             logits_processors=logits_processors,
+            flashinfer_prefill_wrapper_ragged=flashinfer_prefill_wrapper_ragged,
+            flashinfer_prefill_wrapper_paged=flashinfer_prefill_wrapper_paged,
+            flashinfer_decode_wrapper=flashinfer_decode_wrapper,
         )
 
         if forward_mode == ForwardMode.EXTEND:
             ret.init_extend_args()
 
-        if global_server_args_dict.get("enable_flashinfer", False):
-            ret.init_flashinfer_args(model_runner, tp_size)
+        if not global_server_args_dict.get("disable_flashinfer", False):
+            ret.init_flashinfer_args(
+                model_runner.model_config.num_attention_heads // tp_size,
+                model_runner.model_config.get_num_kv_heads(tp_size),
+                model_runner.model_config.head_dim,
+            )
 
         return ret
 
@@ -251,28 +269,27 @@ class ModelRunner:
         self.tp_size = tp_size
         self.nccl_port = nccl_port
         self.server_args = server_args
-
-        # following two dtypes are modified in load_model()
-        self.torch_dtype = torch.bfloat16
-        self.triton_dtype = triton.language.bfloat16
-
-        global global_server_args_dict
-        global_server_args_dict = {
-            "enable_flashinfer": server_args.enable_flashinfer,
-            "attention_reduce_in_fp32": server_args.attention_reduce_in_fp32,
-        }
+        self.is_multimodal_model = is_multimodal_model(self.model_config)
+        monkey_patch_vllm_dummy_weight_loader()
 
         # Init torch distributed
         logger.info(f"[gpu_id={self.gpu_id}] Set cuda device.")
         torch.cuda.set_device(self.gpu_id)
         logger.info(f"[gpu_id={self.gpu_id}] Init nccl begin.")
-        monkey_patch_vllm_p2p_access_check(self.gpu_id)
+
+        if not server_args.enable_p2p_check:
+            monkey_patch_vllm_p2p_access_check(self.gpu_id)
+
+        if server_args.nccl_init_addr:
+            nccl_init_method = f"tcp://{server_args.nccl_init_addr}"
+        else:
+            nccl_init_method = f"tcp://127.0.0.1:{self.nccl_port}"
         init_distributed_environment(
             backend="nccl",
             world_size=self.tp_size,
             rank=self.tp_rank,
             local_rank=self.gpu_id,
-            distributed_init_method=f"tcp://127.0.0.1:{self.nccl_port}",
+            distributed_init_method=nccl_init_method,
         )
 
         initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
@@ -288,10 +305,22 @@ class ModelRunner:
                     "The memory capacity is unbalanced. Some GPUs may be occupied by other processes."
                 )
 
-        self.load_model()
-        self.init_memory_pool(total_gpu_memory, self.torch_dtype)
+        # Set some global args
+        global global_server_args_dict
+        global_server_args_dict = {
+            "disable_flashinfer": server_args.disable_flashinfer,
+            "attention_reduce_in_fp32": server_args.attention_reduce_in_fp32,
+        }
 
-        self.is_multimodal_model = is_multimodal_model(self.model_config)
+        # Load the model and create memory pool
+        self.load_model()
+        self.init_memory_pool(total_gpu_memory)
+        self.init_cublas()
+        self.init_flash_infer()
+
+        # following two dtypes are modified in load_model()
+        self.torch_dtype = torch.bfloat16
+        self.triton_dtype = triton.language.bfloat16
 
     def load_model(self):
         logger.info(
@@ -356,6 +385,7 @@ class ModelRunner:
             seed=42,
             skip_tokenizer_init=True,
         )
+        self.dtype = self.torch_dtype
         if self.model_config.model_overide_args is not None:
             vllm_model_config.hf_config.update(self.model_config.model_overide_args)
 
@@ -364,7 +394,7 @@ class ModelRunner:
             device_config=device_config,
             load_config=load_config,
             lora_config=None,
-            multimodal_config=None,
+            vision_language_config=None,
             parallel_config=None,
             scheduler_config=None,
             cache_config=None,
@@ -372,6 +402,7 @@ class ModelRunner:
         logger.info(
             f"[gpu_id={self.gpu_id}] Load weight end. "
             f"type={type(self.model).__name__}, "
+            f"dtype={self.dtype}, "
             f"avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
 
@@ -380,20 +411,26 @@ class ModelRunner:
             self.gpu_id, distributed=self.tp_size > 1
         )
         head_dim = self.model_config.head_dim
-        head_num = self.model_config.num_key_value_heads // self.tp_size
-        cell_size = head_num * head_dim * self.model_config.num_hidden_layers * 2 * 2
+        head_num = self.model_config.get_num_kv_heads(self.tp_size)
+        cell_size = (
+            head_num
+            * head_dim
+            * self.model_config.num_hidden_layers
+            * 2
+            * torch._utils._element_size(self.dtype)
+        )
         rest_memory = available_gpu_memory - total_gpu_memory * (
             1 - self.mem_fraction_static
         )
         max_num_token = int(rest_memory * (1 << 30) // cell_size)
         return max_num_token
 
-    def init_memory_pool(self, total_gpu_memory, dtype=torch.float16):
+    def init_memory_pool(self, total_gpu_memory):
         self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
 
         if self.max_total_num_tokens <= 0:
             raise RuntimeError(
-                "Not enought memory. Please try to increase --mem-fraction-static."
+                "Not enough memory. Please try to increase --mem-fraction-static."
             )
 
         self.req_to_token_pool = ReqToTokenPool(
@@ -402,7 +439,7 @@ class ModelRunner:
         )
         self.token_to_kv_pool = TokenToKVPool(
             self.max_total_num_tokens,
-            dtype=dtype,
+            dtype=self.dtype,
             head_num=self.model_config.get_num_kv_heads(self.tp_size),
             head_dim=self.model_config.head_dim,
             layer_num=self.model_config.num_hidden_layers,
@@ -411,6 +448,50 @@ class ModelRunner:
             f"[gpu_id={self.gpu_id}] Memory pool end. "
             f"avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
+
+    def init_cublas(self):
+        """We need to run a small matmul to init cublas. Otherwise, it will raise some errors later."""
+        dtype = torch.float16
+        device = "cuda"
+        a = torch.ones((16, 16), dtype=dtype, device=device)
+        b = torch.ones((16, 16), dtype=dtype, device=device)
+        c = a @ b
+        return c
+
+    def init_flash_infer(self):
+        if not global_server_args_dict.get("disable_flashinfer", False):
+            from flashinfer import (
+                BatchDecodeWithPagedKVCacheWrapper,
+                BatchPrefillWithPagedKVCacheWrapper,
+                BatchPrefillWithRaggedKVCacheWrapper,
+            )
+            from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
+
+            if not _grouped_size_compiled_for_decode_kernels(
+                self.model_config.num_attention_heads // self.tp_size,
+                self.model_config.get_num_kv_heads(self.tp_size),
+            ):
+                use_tensor_cores = True
+            else:
+                use_tensor_cores = False
+
+            workspace_buffers = torch.empty(
+                3, 96 * 1024 * 1024, dtype=torch.uint8, device="cuda"
+            )
+            self.flashinfer_prefill_wrapper_ragged = (
+                BatchPrefillWithRaggedKVCacheWrapper(workspace_buffers[0], "NHD")
+            )
+            self.flashinfer_prefill_wrapper_paged = BatchPrefillWithPagedKVCacheWrapper(
+                workspace_buffers[1], "NHD"
+            )
+            self.flashinfer_decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                workspace_buffers[2], "NHD", use_tensor_cores=use_tensor_cores
+            )
+        else:
+            self.flashinfer_prefill_wrapper_ragged = (
+                self.flashinfer_prefill_wrapper_paged
+            ) = None
+            self.flashinfer_decode_wrapper = None
 
     @torch.inference_mode()
     def forward_prefill(self, batch: Batch):
@@ -426,6 +507,9 @@ class ModelRunner:
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
             logits_processors=batch.custom_logits_processors(),
+            flashinfer_prefill_wrapper_ragged=self.flashinfer_prefill_wrapper_ragged,
+            flashinfer_prefill_wrapper_paged=self.flashinfer_prefill_wrapper_paged,
+            flashinfer_decode_wrapper=self.flashinfer_decode_wrapper,
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -445,6 +529,9 @@ class ModelRunner:
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
             logits_processors=batch.custom_logits_processors(),
+            flashinfer_prefill_wrapper_ragged=self.flashinfer_prefill_wrapper_ragged,
+            flashinfer_prefill_wrapper_paged=self.flashinfer_prefill_wrapper_paged,
+            flashinfer_decode_wrapper=self.flashinfer_decode_wrapper,
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -466,6 +553,9 @@ class ModelRunner:
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
             logits_processors=batch.custom_logits_processors(),
+            flashinfer_prefill_wrapper_ragged=self.flashinfer_prefill_wrapper_ragged,
+            flashinfer_prefill_wrapper_paged=self.flashinfer_prefill_wrapper_paged,
+            flashinfer_decode_wrapper=self.flashinfer_decode_wrapper,
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -485,6 +575,9 @@ class ModelRunner:
             top_logprobs_nums=batch.top_logprobs_nums,
             return_logprob=batch.return_logprob,
             logits_processors=batch.custom_logits_processors(),
+            flashinfer_prefill_wrapper_ragged=self.flashinfer_prefill_wrapper_ragged,
+            flashinfer_prefill_wrapper_paged=self.flashinfer_prefill_wrapper_paged,
+            flashinfer_decode_wrapper=self.flashinfer_decode_wrapper,
         )
         return self.model.forward(
             batch.input_ids,

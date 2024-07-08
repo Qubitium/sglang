@@ -1,4 +1,4 @@
-__version__ = "999.1.17"
+__version__ = "999.1.18"
 
 # SGL API Components
 from sglang.api import (

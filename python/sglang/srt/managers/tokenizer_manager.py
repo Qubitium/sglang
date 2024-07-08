@@ -31,7 +31,7 @@ from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_multimodal_model, load_image
-from sglang.utils import get_exception_traceback
+from sglang.utils import find_printable_text, get_exception_traceback
 from sglang.srt.managers.controller.infer_batch import FINISH_MATCHED_STR
 
 
@@ -362,7 +362,7 @@ class TokenizerManager:
         print("in decoder_loop ")
         while True:
             # print(f"detokenizer detokenizer_chan get wait...")
-            recv_obj = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.get)
+            recv_obj: BatchTokenIDOut = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.get)
             assert isinstance(recv_obj, BatchTokenIDOut)
             # print(f"detokenizer detokenizer_chan get done: {recv_obj}")
 
@@ -388,6 +388,8 @@ class TokenizerManager:
             output_strs = []
             for i in range(len(recv_obj.rids)):
                 new_text = read_texts[i][len(surr_texts[i]):]
+                if recv_obj.finished_reason[i] is None:
+                    new_text = find_printable_text(new_text)
                 output_strs.append(recv_obj.decoded_texts[i] + new_text)
                 if isinstance(recv_obj.finished_reason[i], FINISH_MATCHED_STR):
                     pos = output_strs[i].find(recv_obj.finished_reason[i].matched)
@@ -398,10 +400,11 @@ class TokenizerManager:
 
             # print(f"detokenizer tokenizer_chan put",recv_obj.rids)
             output = BatchStrOut(
-                recv_obj.rids,
-                output_strs,
-                recv_obj.meta_info,
-                recv_obj.finished_reason,
+                rids=recv_obj.rids,
+                output_strs=output_strs,
+                meta_info=recv_obj.meta_info,
+                finished=recv_obj.finished_reason,
+                finished_reason=recv_obj.finished_reason,
             )
 
             # previously in another thread/loop
@@ -412,8 +415,8 @@ class TokenizerManager:
 
                 output.meta_info[i]["id"] = rid
                 out_dict = {
-                    "text": output.output_str[i],
-                    "meta_info": output.meta_info[i],
+                    "text": recv_obj.output_strs[i],
+                    "meta_info": recv_obj.meta_info[i],
                 }
 
                 state.out_list.append(out_dict)

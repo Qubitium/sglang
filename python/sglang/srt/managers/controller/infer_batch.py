@@ -3,7 +3,7 @@
 import warnings
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import List, Optional, Any
+from typing import List, Union
 
 import numpy as np
 import torch
@@ -32,7 +32,7 @@ class BaseFinishReason:
 
 
 class FINISH_MATCHED_TOKEN(BaseFinishReason):
-    def __init__(self, matched: int | List[int]):
+    def __init__(self, matched: Union[int, List[int]]):
         super().__init__()
         self.matched = matched
 
@@ -536,9 +536,10 @@ class Batch:
                         req.output_ids = cur_output_ids
                         continue
 
-                    jump_forward_str, next_state = (
-                        req.jump_forward_map.jump_forward_symbol(cur_state)
-                    )
+                    (
+                        jump_forward_str,
+                        next_state,
+                    ) = req.jump_forward_map.jump_forward_symbol(cur_state)
 
                     # Make the incrementally decoded text part of jump_forward_str
                     # so that the UTF-8 will not corrupt

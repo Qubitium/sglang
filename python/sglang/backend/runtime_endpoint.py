@@ -1,14 +1,14 @@
 import json
-from typing import Callable, List, Optional, Union
+from typing import List, Optional
 
 import numpy as np
-import requests
+
 from sglang.backend.base_backend import BaseBackend
 from sglang.global_config import global_config
 from sglang.lang.chat_template import get_chat_template_by_model_path
 from sglang.lang.interpreter import StreamExecutor
-from sglang.lang.ir import SglArgument, SglSamplingParams
-from sglang.utils import encode_image_base64, find_printable_text, http_request
+from sglang.lang.ir import SglSamplingParams
+from sglang.utils import http_request
 
 
 class RuntimeEndpoint(BaseBackend):
@@ -180,21 +180,16 @@ class RuntimeEndpoint(BaseBackend):
         self._assert_success(res)
         pos = 0
 
-        incomplete_text = ""
         for chunk in res.iter_lines(decode_unicode=False):
             chunk = chunk.decode("utf-8")
             if chunk and chunk.startswith("data:"):
                 if chunk == "data: [DONE]":
                     break
                 data = json.loads(chunk[5:].strip("\n"))
-                text = find_printable_text(data["text"][pos:])
+                chunk_text = data["text"][pos:]
                 meta_info = data["meta_info"]
-                pos += len(text)
-                incomplete_text = data["text"][pos:]
-                yield text, meta_info
-
-        if len(incomplete_text) > 0:
-            yield incomplete_text, meta_info
+                pos += len(chunk_text)
+                yield chunk_text, meta_info
 
     def select(
         self,
