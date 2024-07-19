@@ -70,6 +70,7 @@ class BenchArgs:
 
 def load_model(server_args, tp_rank):
     suppress_other_loggers()
+    rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
 
     model_config = ModelConfig(path=server_args.model_path)
     model_runner = ModelRunner(
@@ -81,7 +82,7 @@ def load_model(server_args, tp_rank):
         nccl_port=28888,
         server_args=server_args,
     )
-    print(f"max_total_num_tokens={model_runner.max_total_num_tokens}")
+    rank_print(f"max_total_num_tokens={model_runner.max_total_num_tokens}")
     tokenizer = get_tokenizer(
         server_args.tokenizer_path,
         tokenizer_mode=server_args.tokenizer_mode,
@@ -155,14 +156,14 @@ def extend(reqs, model_runner):
     )
     batch.prepare_for_extend(model_runner.model_config.vocab_size, None)
     output = model_runner.forward(batch, ForwardMode.EXTEND)
-    next_token_ids, _ = batch.sample(output.next_token_logits)
+    next_token_ids = batch.sample(output.next_token_logits)
     return next_token_ids, output.next_token_logits, batch
 
 
 def decode(input_token_ids, batch, model_runner):
     batch.prepare_for_decode(input_token_ids.cpu().numpy())
     output = model_runner.forward(batch, ForwardMode.DECODE)
-    next_token_ids, _ = batch.sample(output.next_token_logits)
+    next_token_ids = batch.sample(output.next_token_logits)
     return next_token_ids, output.next_token_logits
 
 
@@ -201,7 +202,7 @@ def correctness_test(
 
     # Print
     for i in range(len(reqs)):
-        print(tokenizer.decode(output_ids[i]))
+        rank_print(tokenizer.decode(output_ids[i]))
 
 
 def latency_test(
@@ -213,7 +214,7 @@ def latency_test(
 
     # Load the model
     model_runner, tokenizer = load_model(server_args, tp_rank)
-    print(
+    rank_print(
         f"max_batch_size={model_runner.max_total_num_tokens // (bench_args.input_len + bench_args.output_len)}"
     )
 
@@ -283,21 +284,26 @@ def main(server_args, bench_args):
     else:
         work_func = latency_test
 
-    workers = []
-    for tp_rank in range(server_args.tp_size):
-        proc = multiprocessing.Process(
-            target=work_func,
-            args=(
-                server_args,
-                bench_args,
-                tp_rank,
-            ),
-        )
-        proc.start()
-        workers.append(proc)
+    if server_args.tp_size == 1:
+        work_func(server_args, bench_args, 0)
+    else:
+        workers = []
+        for tp_rank in range(server_args.tp_size):
+            proc = multiprocessing.Process(
+                target=work_func,
+                args=(
+                    server_args,
+                    bench_args,
+                    tp_rank,
+                ),
+            )
+            proc.start()
+            workers.append(proc)
 
-    for proc in workers:
-        proc.join()
+        for proc in workers:
+            proc.join()
+
+        proc.terminate()
 
 
 if __name__ == "__main__":

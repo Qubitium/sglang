@@ -68,10 +68,16 @@ def gen(
     presence_penalty: Optional[float] = None,
     repetition_penalty: Optional[float] = None,
     ignore_eos: Optional[bool] = None,
+    return_logprob: Optional[bool] = None,
+    logprob_start_len: Optional[int] = None,
+    top_logprobs_num: Optional[int] = None,
+    return_text_in_logprobs: Optional[bool] = None,
     dtype: Optional[type] = None,
     choices: Optional[List[str]] = None,
     regex: Optional[str] = None,
 ):
+    """Call the model to generate. See the meaning of the arguments in docs/sampling_params.md"""
+
     if choices:
         return SglSelect(name, choices, 0.0 if temperature is None else temperature)
 
@@ -93,6 +99,10 @@ def gen(
         presence_penalty,
         repetition_penalty,
         ignore_eos,
+        return_logprob,
+        logprob_start_len,
+        top_logprobs_num,
+        return_text_in_logprobs,
         dtype,
         regex,
     )
@@ -109,6 +119,10 @@ def gen_int(
     presence_penalty: Optional[float] = None,
     repetition_penalty: Optional[float] = None,
     ignore_eos: Optional[bool] = None,
+    return_logprob: Optional[bool] = None,
+    logprob_start_len: Optional[int] = None,
+    top_logprobs_num: Optional[int] = None,
+    return_text_in_logprobs: Optional[bool] = None,
 ):
     return SglGen(
         name,
@@ -121,6 +135,10 @@ def gen_int(
         presence_penalty,
         repetition_penalty,
         ignore_eos,
+        return_logprob,
+        logprob_start_len,
+        top_logprobs_num,
+        return_text_in_logprobs,
         int,
         None,
     )
@@ -137,6 +155,10 @@ def gen_string(
     presence_penalty: Optional[float] = None,
     repetition_penalty: Optional[float] = None,
     ignore_eos: Optional[bool] = None,
+    return_logprob: Optional[bool] = None,
+    logprob_start_len: Optional[int] = None,
+    top_logprobs_num: Optional[int] = None,
+    return_text_in_logprobs: Optional[bool] = None,
 ):
     return SglGen(
         name,
@@ -149,6 +171,10 @@ def gen_string(
         presence_penalty,
         repetition_penalty,
         ignore_eos,
+        return_logprob,
+        logprob_start_len,
+        top_logprobs_num,
+        return_text_in_logprobs,
         str,
         None,
     )

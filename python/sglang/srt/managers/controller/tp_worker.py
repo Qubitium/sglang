@@ -1,15 +1,14 @@
 """A tensor parallel worker."""
 
-import asyncio
 import logging
+import multiprocessing
+import pickle
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
-import rpyc
 import torch
-from rpyc.utils.classic import obtain
+import torch.distributed as dist
 
 from sglang.global_config import global_config
 from sglang.srt.constrained.fsm_cache import FSMCache
@@ -32,13 +31,11 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
 )
 from sglang.srt.model_config import ModelConfig
-from sglang.srt.server_args import ModelPortArgs, ServerArgs
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
-    connect_rpyc_service,
     get_int_token_logit_bias,
     is_multimodal_model,
     set_random_seed,
-    start_rpyc_service_process,
     suppress_other_loggers,
 )
 from sglang.utils import get_exception_traceback
@@ -52,10 +49,9 @@ class ModelTpServer:
         gpu_id: int,
         tp_rank: int,
         server_args: ServerArgs,
-        model_port_args: ModelPortArgs,
-        model_overide_args,
+        nccl_port: int,
+        model_overide_args: dict,
     ):
-        server_args, model_port_args = obtain(server_args), obtain(model_port_args)
         suppress_other_loggers()
 
         # Copy arguments
@@ -79,7 +75,7 @@ class ModelTpServer:
             gpu_id=gpu_id,
             tp_rank=tp_rank,
             tp_size=server_args.tp_size,
-            nccl_port=model_port_args.nccl_port,
+            nccl_port=nccl_port,
             server_args=server_args,
         )
 
@@ -98,7 +94,7 @@ class ModelTpServer:
             )
         self.max_total_num_tokens = self.model_runner.max_total_num_tokens
         self.max_prefill_tokens = (
-            4096
+            16384
             if server_args.max_prefill_tokens is None
             else server_args.max_prefill_tokens
         )
@@ -178,9 +174,6 @@ class ModelTpServer:
         self.new_token_ratio_recovery = global_config.new_token_ratio_recovery
 
     def exposed_step(self, recv_reqs):
-        if self.tp_size * self.dp_size != 1:
-            recv_reqs = obtain(recv_reqs)
-
         try:
             # Recv requests
             for recv_req in recv_reqs:
@@ -206,11 +199,11 @@ class ModelTpServer:
 
     @torch.inference_mode()
     def forward_step(self):
-        new_batch = self.get_new_fill_batch()
+        new_batch = self.get_new_prefill_batch()
 
         if new_batch is not None:
-            # Run a new fill batch
-            self.forward_fill_batch(new_batch)
+            # Run a new prefill batch
+            self.forward_prefill_batch(new_batch)
             self.cache_filled_batch(new_batch)
 
             if not new_batch.is_empty():
@@ -219,37 +212,20 @@ class ModelTpServer:
                 else:
                     self.running_batch.merge(new_batch)
         else:
-            # Run decode batch
+            # Run a decode batch
             if self.running_batch is not None:
                 # TODO: hardcoded value here is never optimal.
                 #  1. We want to merge new requests into batch
                 #  2. This code wants to do at least 10 decode_steps before merging new requests
                 #  3. We need a healthy test of 1 and 2 and avoid using a static value here.
                 # Run a few decode batches continuously for reducing overhead
-                for _ in range(10):
+                for _ in range(global_config.num_continue_decode_steps):
                     self.num_generated_tokens += len(self.running_batch.reqs)
                     self.forward_decode_batch(self.running_batch)
 
                     # Print stats
-                    if self.tp_rank == 0:
-                        if self.decode_forward_ct % 40 == 0:
-                            num_used = self.max_total_num_tokens - (
-                                self.token_to_kv_pool.available_size()
-                                + self.tree_cache.evictable_size()
-                            )
-                            throughput = self.num_generated_tokens / (
-                                time.time() - self.last_stats_tic
-                            )
-                            self.num_generated_tokens = 0
-                            self.last_stats_tic = time.time()
-                            logger.info(
-                                f"[gpu_id={self.gpu_id}] Decode batch. "
-                                f"#running-req: {len(self.running_batch.reqs)}, "
-                                f"#token: {num_used}, "
-                                f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
-                                f"gen throughput (token/s): {throughput:.2f}, "
-                                f"#queue-req: {len(self.forward_queue)}"
-                            )
+                    if self.tp_rank == 0 and self.decode_forward_ct % 40 == 0:
+                        self.print_stats()
 
                     if self.running_batch.is_empty():
                         self.running_batch = None
@@ -258,17 +234,34 @@ class ModelTpServer:
                     if self.out_pyobjs and self.running_batch.has_stream():
                         break
             else:
-                # Check the available size
-                available_size = (
-                    self.token_to_kv_pool.available_size()
-                    + self.tree_cache.evictable_size()
-                )
-                if available_size != self.max_total_num_tokens:
-                    warnings.warn(
-                        "Warning: "
-                        f"available_size={available_size}, max_total_num_tokens={self.max_total_num_tokens}\n"
-                        "KV cache pool leak detected!"
-                    )
+                self.check_memory()
+
+    def print_stats(self):
+        num_used = self.max_total_num_tokens - (
+            self.token_to_kv_pool.available_size() + self.tree_cache.evictable_size()
+        )
+        throughput = self.num_generated_tokens / (time.time() - self.last_stats_tic)
+        self.num_generated_tokens = 0
+        self.last_stats_tic = time.time()
+        logger.info(
+            f"[gpu_id={self.gpu_id}] Decode batch. "
+            f"#running-req: {len(self.running_batch.reqs)}, "
+            f"#token: {num_used}, "
+            f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
+            f"gen throughput (token/s): {throughput:.2f}, "
+            f"#queue-req: {len(self.forward_queue)}"
+        )
+
+    def check_memory(self):
+        available_size = (
+            self.token_to_kv_pool.available_size() + self.tree_cache.evictable_size()
+        )
+        if available_size != self.max_total_num_tokens:
+            warnings.warn(
+                "Warning: "
+                f"available_size={available_size}, max_total_num_tokens={self.max_total_num_tokens}\n"
+                "KV cache pool leak detected!"
+            )
 
     def handle_generate_request(
         self,
@@ -317,12 +310,12 @@ class ModelTpServer:
         )
         self.forward_queue.append(req)
 
-    def get_new_fill_batch(self) -> Optional[Batch]:
-        if (
-            self.running_batch is not None
-            and len(self.running_batch.reqs) > self.max_running_requests
-        ):
-            return None
+    def get_new_prefill_batch(self) -> Optional[Batch]:
+        running_bs = (
+            len(self.running_batch.reqs) if self.running_batch is not None else 0
+        )
+        if running_bs >= self.max_running_requests:
+            return
 
         # Compute matched prefix length
         for req in self.forward_queue:
@@ -348,7 +341,8 @@ class ModelTpServer:
         if self.running_batch:
             available_size -= sum(
                 [
-                    (r.max_new_tokens() - len(r.output_ids)) * self.new_token_ratio
+                    (r.sampling_params.max_new_tokens - len(r.output_ids))
+                    * self.new_token_ratio
                     for r in self.running_batch.reqs
                 ]
             )
@@ -362,7 +356,7 @@ class ModelTpServer:
                     req.prefix_indices = req.prefix_indices[:-delta]
                     if req.image_offset is not None:
                         req.image_offset += delta
-            if req.extend_input_len == 0 and req.max_new_tokens() > 0:
+            if req.extend_input_len == 0 and req.sampling_params.max_new_tokens > 0:
                 # Need at least one token to compute logits
                 req.extend_input_len = 1
                 req.prefix_indices = req.prefix_indices[:-1]
@@ -370,7 +364,9 @@ class ModelTpServer:
                     req.image_offset += 1
 
             if (
-                req.extend_input_len + req.max_new_tokens() + new_batch_total_tokens
+                req.extend_input_len
+                + req.sampling_params.max_new_tokens
+                + new_batch_total_tokens
                 < available_size
                 and (
                     req.extend_input_len + new_batch_input_tokens
@@ -382,7 +378,9 @@ class ModelTpServer:
                 available_size += delta
 
                 if not (
-                    req.extend_input_len + req.max_new_tokens() + new_batch_total_tokens
+                    req.extend_input_len
+                    + req.sampling_params.max_new_tokens
+                    + new_batch_total_tokens
                     < available_size
                 ):
                     # Undo locking
@@ -393,19 +391,20 @@ class ModelTpServer:
                     # Add this request to the running batch
                     can_run_list.append(req)
                     new_batch_total_tokens += (
-                        req.extend_input_len + req.max_new_tokens()
+                        req.extend_input_len + req.sampling_params.max_new_tokens
                     )
                     new_batch_input_tokens += req.extend_input_len
             else:
                 break
+
+            if running_bs + len(can_run_list) >= self.max_running_requests:
+                break
+
         if len(can_run_list) == 0:
             return None
 
         # Print stats
         if self.tp_rank == 0:
-            running_req = (
-                0 if self.running_batch is None else len(self.running_batch.reqs)
-            )
             hit_tokens = sum(len(x.prefix_indices) for x in can_run_list)
             self.tree_cache_metrics["total"] += (
                 hit_tokens + new_batch_input_tokens
@@ -420,15 +419,9 @@ class ModelTpServer:
                 f"#new-token: {new_batch_input_tokens}, "
                 f"#cached-token: {hit_tokens}, "
                 f"cache hit rate: {100.0 * tree_cache_hit_rate:.2f}%, "
-                f"#running-req: {running_req}, "
+                f"#running-req: {running_bs}, "
                 f"#queue-req: {len(self.forward_queue) - len(can_run_list)}"
             )
-            # logger.debug(
-            #    f"fsm_cache_hit_rate: {100.0 * self.regex_fsm_cache.get_cache_hit_rate():.2f}%. "
-            #    f"fsm_cache_avg_init_time: {self.regex_fsm_cache.get_avg_init_time():.2f}s. "
-            #    f"ff_cache_hit_rate: {100.0 * self.jump_forward_cache.get_cache_hit_rate():.2f}%. "
-            #    f"ff_cache_avg_init_time: {self.jump_forward_cache.get_avg_init_time():.2f}s. "
-            # )
 
         # Return the new batch
         new_batch = Batch.init_new(
@@ -440,7 +433,7 @@ class ModelTpServer:
         self.forward_queue = [x for x in self.forward_queue if x not in can_run_list]
         return new_batch
 
-    def forward_fill_batch(self, batch: Batch):
+    def forward_prefill_batch(self, batch: Batch):
         # Build batch tensors
         batch.prepare_for_extend(
             self.model_config.vocab_size, self.int_token_logit_bias, self.model_runner.torch_dtype
@@ -449,7 +442,7 @@ class ModelTpServer:
         # Forward and sample the next tokens
         if batch.extend_num_tokens != 0:
             output = self.model_runner.forward(batch, ForwardMode.EXTEND)
-            next_token_ids, _ = batch.sample(output.next_token_logits)
+            next_token_ids = batch.sample(output.next_token_logits)
 
             # Move logprobs to cpu
             if output.next_token_logprobs is not None:
@@ -576,7 +569,7 @@ class ModelTpServer:
 
         # Forward and sample the next tokens
         output = self.model_runner.forward(batch, ForwardMode.DECODE)
-        next_token_ids, _ = batch.sample(output.next_token_logits)
+        next_token_ids = batch.sample(output.next_token_logits)
 
         # Move logprobs to cpu
         if output.next_token_logprobs is not None:
@@ -605,8 +598,8 @@ class ModelTpServer:
     def handle_finished_requests(self, batch: Batch):
         output_rids = []
         decoded_texts = []
-        surr_output_ids = []
-        read_output_ids = []
+        output_read_ids = []
+        output_read_offsets = []
         output_skip_special_tokens = []
         output_spaces_between_special_tokens = []
         output_meta_info = []
@@ -630,9 +623,9 @@ class ModelTpServer:
             ):
                 output_rids.append(req.rid)
                 decoded_texts.append(req.decoded_text)
-                surr_ids, read_ids, _ = req.init_detokenize_incrementally()
-                surr_output_ids.append(surr_ids)
-                read_output_ids.append(read_ids)
+                read_ids, read_offset = req.init_incremental_detokenize()
+                output_read_ids.append(read_ids)
+                output_read_offsets.append(read_offset)
                 output_skip_special_tokens.append(
                     req.sampling_params.skip_special_tokens
                 )
@@ -671,8 +664,8 @@ class ModelTpServer:
                 BatchTokenIDOut(
                     output_rids,
                     decoded_texts,
-                    surr_output_ids,
-                    read_output_ids,
+                    output_read_ids,
+                    output_read_offsets,
                     output_skip_special_tokens,
                     output_spaces_between_special_tokens,
                     output_meta_info,
@@ -737,87 +730,74 @@ class ModelTpServer:
                     break
 
 
-class ModelTpService(rpyc.Service):
-    exposed_ModelTpServer = ModelTpServer
+def run_tp_server(
+    gpu_id: int,
+    tp_rank: int,
+    server_args: ServerArgs,
+    nccl_port: int,
+    model_overide_args: dict,
+):
+    """Run a tensor parallel server."""
+    try:
+        model_server = ModelTpServer(
+            gpu_id,
+            tp_rank,
+            server_args,
+            nccl_port,
+            model_overide_args,
+        )
+        tp_cpu_group = model_server.model_runner.tp_group.cpu_group
+
+        while True:
+            recv_reqs = broadcast_recv_input(None, tp_rank, tp_cpu_group)
+            model_server.exposed_step(recv_reqs)
+    except Exception:
+        logger.error("Exception in run_tp_server:\n" + get_exception_traceback())
+        raise
 
 
-class ModelTpClient:
-    def __init__(
-        self,
-        gpu_ids: List[int],
-        server_args: ServerArgs,
-        model_port_args: ModelPortArgs,
-        model_overide_args,
-    ):
-        server_args, model_port_args = obtain(server_args), obtain(model_port_args)
-        self.tp_size = server_args.tp_size
+def launch_tp_servers(
+    gpu_ids, tp_rank_range, server_args, nccl_port, model_overide_args
+):
+    """Launch multiple tensor parallel servers."""
+    procs = []
+    for i in tp_rank_range:
+        proc = multiprocessing.Process(
+            target=run_tp_server,
+            args=(gpu_ids[i], i, server_args, nccl_port, model_overide_args),
+        )
+        proc.start()
+        procs.append(proc)
 
-        if self.tp_size * server_args.dp_size == 1:
-            # Init model
-            assert len(gpu_ids) == 1
-            self.model_server = ModelTpService().exposed_ModelTpServer(
-                0,
-                gpu_ids[0],
-                server_args,
-                model_port_args,
-                model_overide_args,
-            )
+    return procs
 
-            # Wrap functions
-            def async_wrap(f):
-                async def _func(*args, **kwargs):
-                    return f(*args, **kwargs)
 
-                return _func
+def broadcast_recv_input(data, rank, dist_group):
+    """Broadcast inputs from rank=0 to all other ranks with torch.dist backend."""
 
-            self.step = async_wrap(self.model_server.exposed_step)
+    if rank == 0:
+        if len(data) == 0:
+            tensor_size = torch.tensor([0], dtype=torch.long)
+            dist.broadcast(tensor_size, src=0, group=dist_group)
         else:
-            with ThreadPoolExecutor(self.tp_size) as executor:
-                # Launch model processes
-                if server_args.nnodes == 1:
-                    self.procs = list(
-                        executor.map(
-                            lambda args: start_rpyc_service_process(*args),
-                            [
-                                (ModelTpService, p)
-                                for p in model_port_args.model_tp_ports
-                            ],
-                        )
-                    )
-                    addrs = [("localhost", p) for p in model_port_args.model_tp_ports]
-                else:
-                    addrs = [
-                        (ip, port)
-                        for ip, port in zip(
-                            model_port_args.model_tp_ips, model_port_args.model_tp_ports
-                        )
-                    ]
+            serialized_data = pickle.dumps(data)
+            size = len(serialized_data)
+            tensor_data = torch.ByteTensor(list(serialized_data))
+            tensor_size = torch.tensor([size], dtype=torch.long)
 
-                self.model_services = list(
-                    executor.map(lambda args: connect_rpyc_service(*args), addrs)
-                )
+            dist.broadcast(tensor_size, src=0, group=dist_group)
+            dist.broadcast(tensor_data, src=0, group=dist_group)
+    else:
+        tensor_size = torch.tensor([0], dtype=torch.long)
+        dist.broadcast(tensor_size, src=0, group=dist_group)
+        size = tensor_size.item()
 
-                # Init model
-                def init_model(i):
-                    return self.model_services[i].ModelTpServer(
-                        gpu_ids[i],
-                        i,
-                        server_args,
-                        model_port_args,
-                        model_overide_args,
-                    )
+        if size == 0:
+            return []
 
-                self.model_servers = list(executor.map(init_model, range(self.tp_size)))
+        tensor_data = torch.empty(size, dtype=torch.uint8)
+        dist.broadcast(tensor_data, src=0, group=dist_group)
 
-            # Wrap functions
-            def async_wrap(func_name):
-                fs = [rpyc.async_(getattr(m, func_name)) for m in self.model_servers]
-
-                async def _func(*args, **kwargs):
-                    tasks = [f(*args, **kwargs) for f in fs]
-                    await asyncio.gather(*[asyncio.to_thread(t.wait) for t in tasks])
-                    return obtain(tasks[0].value)
-
-                return _func
-
-            self.step = async_wrap("step")
+        serialized_data = bytes(tensor_data.tolist())
+        data = pickle.loads(serialized_data)
+        return data

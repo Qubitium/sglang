@@ -33,10 +33,10 @@ from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.controller.manager_multi import (
     start_controller_process as start_controller_process_multi,
 )
+from sglang.srt.managers.controller.manager_single import launch_tp_servers
 from sglang.srt.managers.controller.manager_single import (
     start_controller_process as start_controller_process_single,
 )
-from sglang.srt.managers.controller.tp_worker import ModelTpService
 from sglang.srt.managers.detokenizer_manager import start_detokenizer_process
 from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
@@ -45,16 +45,13 @@ from sglang.srt.openai_api_adapter import (
     v1_chat_completions,
     v1_completions,
 )
-from sglang.srt.server_args import ModelPortArgs, PortArgs, ServerArgs
+from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
     API_KEY_HEADER_NAME,
     APIKeyValidatorMiddleware,
     allocate_init_ports,
     assert_pkg_version,
     enable_show_time_cost,
-    receive_addrs,
-    send_addrs_to_rank_0,
-    start_rpyc_service_process,
 )
 from sglang.utils import get_exception_traceback
 
@@ -85,6 +82,9 @@ API_KEY_HEADER_NAME = "X-API-Key"
 app = FastAPI()
 tokenizer_manager = None
 
+# Put some args for easily access
+global_server_args_dict = {}
+
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
@@ -114,7 +114,8 @@ async def flush_cache():
     )
 
 
-async def generate_request(obj: GenerateReqInput, request: Request = None):
+async def generate_request(obj: GenerateReqInput, request: Request=None):
+    """Handle a generate request."""
     if obj.stream:
 
         async def stream_results():
@@ -155,8 +156,47 @@ async def openai_v1_chat_completions(raw_request: Request):
     return await v1_chat_completions(tokenizer_manager, raw_request)
 
 
-def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None, model_overide_args=None):
+def _set_global_server_args(server_args: ServerArgs):
+    global global_server_args_dict
+    global_server_args_dict = {
+        "disable_flashinfer": server_args.disable_flashinfer,
+        "attention_reduce_in_fp32": server_args.attention_reduce_in_fp32,
+    }
+
+
+def _set_ulimit(target_soft_limit=65535):
+    import resource
+
+    resource_type = resource.RLIMIT_NOFILE
+    current_soft, current_hard = resource.getrlimit(resource_type)
+
+    if current_soft >= target_soft_limit:
+        logger.info(
+            f"Current limits are already sufficient: soft={current_soft}, hard={current_hard}"
+        )
+    else:
+        try:
+            resource.setrlimit(resource_type, (target_soft_limit, current_hard))
+            new_soft, new_hard = resource.getrlimit(resource_type)
+            logger.info(
+                f"Successfully set new limits: soft={new_soft}, hard={new_hard}"
+            )
+        except ValueError as e:
+            logger.warn(f"Failed to set new limits: {e}")
+            logger.info(
+                f"Limits remain unchanged: soft={current_soft}, hard={current_hard}"
+            )
+
+
+def launch_server(
+    server_args: ServerArgs,
+    tokenizer_init_chan=None,
+    model_overide_args: Optional[dict] = None,
+    pipe_finish_writer: Optional[mp.connection.Connection] = None,
+):
+    """Launch an HTTP server."""
     print("launch_server started.... ")
+
     global tokenizer_manager
 
     logging.basicConfig(
@@ -166,6 +206,9 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
 
     # Set global environments
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    os.environ["NCCL_CUMEM_ENABLE"] = "0"
+    os.environ["NCCL_NVLS_ENABLE"] = "0"
+    _set_ulimit()
     if server_args.show_time_cost:
         enable_show_time_cost()
     if server_args.disable_disk_cache:
@@ -173,7 +216,7 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
     if not server_args.disable_flashinfer:
         assert_pkg_version(
             "flashinfer",
-            "0.0.8",
+            "0.1.0",
             "Please uninstall the old version and "
             "reinstall the latest version by following the instructions "
             "at https://docs.flashinfer.ai/installation.html.",
@@ -181,34 +224,20 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
     if server_args.chat_template:
         # TODO: replace this with huggingface transformers template
         load_chat_template_for_openai_api(server_args.chat_template)
+    _set_global_server_args(server_args)
 
     # Allocate ports
-    assert server_args.tp_size % server_args.nnodes == 0
-    tp_size_local = server_args.tp_size // server_args.nnodes
     server_args.port, server_args.additional_ports = allocate_init_ports(
         server_args.port,
         server_args.additional_ports,
-        tp_size_local,
         server_args.dp_size,
     )
-
     ports = server_args.additional_ports
-    model_port_args = []
-    for i in range(server_args.dp_size):
-        model_port_args.append(
-            ModelPortArgs(
-                nccl_port=ports[3 + i * (tp_size_local + 1)],
-                model_tp_ips=[None] * tp_size_local,
-                model_tp_ports=ports[
-                    3 + i * (tp_size_local + 1) + 1 : 3 + (i + 1) * (tp_size_local + 1)
-                ],
-            )
-        )
     port_args = PortArgs(
         tokenizer_port=ports[0],
-        router_port=ports[1],
+        controller_port=ports[1],
         detokenizer_port=ports[2],
-        model_port_args=model_port_args,
+        nccl_ports=ports[3:],
     )
     router_chan = mp.Queue()
     detokenizer_chan = mp.Queue()
@@ -216,20 +245,27 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
     startup_chan = mp.Queue()
 
 
-    # TODO multi-node dp is not supported
-    assert not (server_args.dp_size > 1 and server_args.node_rank is not None)
+    # Handle multi-node tensor parallelism
     if server_args.nnodes > 1:
+        assert server_args.dp_size == 1, "Multi-node dp is not supported."
+
         if server_args.node_rank != 0:
-            send_addrs_to_rank_0(model_port_args[0], server_args)
-        else:
-            receive_addrs(model_port_args[0], server_args)
-        for i in range(tp_size_local):
-            start_rpyc_service_process(
-                ModelTpService, model_port_args[0].model_tp_ports[i]
+            tp_size_local = server_args.tp_size // server_args.nnodes
+            gpu_ids = [
+                i for _ in range(server_args.nnodes) for i in range(tp_size_local)
+            ]
+            tp_rank_range = list(
+                range(
+                    server_args.node_rank * tp_size_local,
+                    (server_args.node_rank + 1) * tp_size_local,
+                )
             )
-        if server_args.node_rank != 0:
-            logger.info(
-                f"[node_rank={server_args.node_rank}]: Listen for connections..."
+            procs = launch_tp_servers(
+                gpu_ids,
+                tp_rank_range,
+                server_args,
+                ports[3],
+                model_overide_args,
             )
             while True:
                 pass
@@ -264,7 +300,8 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
     if router_init_state != "init ok":
         proc_router.kill()
         print(
-            f"Initialization failed. router_init_state: {router_init_state}", flush=True
+            f"Initialization failed. controller_init_state: {router_init_state}",
+            flush=True,
         )
         sys.exit(1)
 
@@ -316,7 +353,9 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
             pipe_finish_writer.send("init ok")
 
     if tokenizer_init_chan is None:
-        t = threading.Thread(target=_wait_and_warmup)
+        t = threading.Thread(
+            target=_wait_and_warmup, args=(server_args, pipe_finish_writer)
+        )
         t.start()
 
         # Listen for requests
@@ -331,6 +370,48 @@ def launch_server(server_args, tokenizer_init_chan=None, pipe_finish_writer=None
             )
         finally:
             t.join()
+
+
+def _wait_and_warmup(server_args, pipe_finish_writer):
+    headers = {}
+    url = server_args.url()
+    if server_args.api_key:
+        headers[API_KEY_HEADER_NAME] = server_args.api_key
+
+    # Wait until the server is launched
+    for _ in range(120):
+        time.sleep(0.5)
+        try:
+            requests.get(url + "/get_model_info", timeout=5, headers=headers)
+            break
+        except requests.exceptions.RequestException:
+            pass
+
+    # Send a warmup request
+    try:
+        for _ in range(server_args.dp_size):
+            res = requests.post(
+                url + "/generate",
+                json={
+                    "text": "The capital city of France is",
+                    "sampling_params": {
+                        "temperature": 0,
+                        "max_new_tokens": 8,
+                    },
+                },
+                headers=headers,
+                timeout=600,
+            )
+            assert res.status_code == 200
+    except Exception as e:
+        if pipe_finish_writer is not None:
+            pipe_finish_writer.send(get_exception_traceback())
+        print(f"Initialization failed. warmup error: {e}", flush=True)
+        raise e
+
+    logger.info("The server is fired up and ready to roll!")
+    if pipe_finish_writer is not None:
+        pipe_finish_writer.send("init ok")
 
 
 class Runtime:
@@ -355,7 +436,6 @@ class Runtime:
         self.server_args.port, self.server_args.additional_ports = allocate_init_ports(
             self.server_args.port,
             self.server_args.additional_ports,
-            self.server_args.tp_size,
             self.server_args.dp_size,
         )
 
@@ -368,7 +448,7 @@ class Runtime:
         # pipe_reader, pipe_writer = mp.Pipe(duplex=False)
         # proc = mp.Process(
         #     target=launch_server,
-        #     args=(self.server_args, pipe_writer, model_overide_args),
+        #     args=(self.server_args, model_overide_args, pipe_writer),
         # )
         # proc.start()
         # pipe_writer.close()

@@ -4,6 +4,7 @@
 import torch
 import triton
 import triton.language as tl
+# from sglang.srt.server import global_server_args_dict
 from sglang.srt.utils import wrap_kernel_launcher
 
 # TODO FIXME why do we need this param?
@@ -108,7 +109,6 @@ def _fwd_kernel_stage2(
     stride_obs,
     stride_oh,
     stride_req_to_token_b,
-    other_kv_index,  # To fix a NAN issue
     kv_group_num: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -139,7 +139,7 @@ def _fwd_kernel_stage2(
             + cur_batch_req_idx * stride_req_to_token_b
             + (start_n + offs_n),
             mask=(start_n + offs_n) < cur_batch_seq_len,
-            other=other_kv_index,
+            other=0,
         )
 
         qk = tl.load(
@@ -251,7 +251,6 @@ def _token_softmax_reducev_fwd(
     b_req_idx,
     b_start_loc,
     b_seq_len,
-    other_kv_index,
 ):
     BLOCK = 64
     batch, head = b_seq_len.shape[0], logics.shape[0]
@@ -278,7 +277,6 @@ def _token_softmax_reducev_fwd(
             o.stride(0),
             o.stride(1),
             req_to_tokens.stride(0),
-            other_kv_index,
         )
         return
 
@@ -296,7 +294,6 @@ def _token_softmax_reducev_fwd(
         o.stride(0),
         o.stride(1),
         req_to_tokens.stride(0),
-        other_kv_index,
         kv_group_num=kv_group_num,
         BLOCK_DMODEL=v_buffer.shape[-1],
         BLOCK_N=BLOCK,
@@ -316,9 +313,8 @@ def token_attention_fwd(
     b_start_loc,
     b_seq_len,
     max_len_in_batch,
-    other_kv_index,
     total_num_tokens,
-    sm_scale=None,
+    sm_scale,
     logit_cap=-1,
     att_m=None,
 ):
@@ -326,7 +322,6 @@ def token_attention_fwd(
         att_m = torch.empty(
             (q.shape[-2], total_num_tokens), dtype=REDUCE_TORCH_TYPE, device="cuda"
         )
-    sm_scale = 1.0 / (Lq**0.5) if sm_scale is None else sm_scale
 
     _token_att_m_fwd(
         q,
@@ -348,5 +343,4 @@ def token_attention_fwd(
         b_req_idx,
         b_start_loc,
         b_seq_len,
-        other_kv_index,
     )

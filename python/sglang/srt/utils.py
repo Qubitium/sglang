@@ -3,7 +3,6 @@
 import base64
 import fcntl
 import logging
-import multiprocessing
 import os
 import random
 import socket
@@ -16,7 +15,6 @@ from typing import List, Optional
 import numpy as np
 import psutil
 import requests
-import rpyc
 import torch
 
 import torch.distributed as dist
@@ -31,7 +29,6 @@ from typing import (
 import triton
 from fastapi.responses import JSONResponse
 from packaging import version as pkg_version
-from rpyc.utils.server import ThreadedServer
 from starlette.middleware.base import BaseHTTPMiddleware
 import asyncio
 
@@ -156,10 +153,9 @@ def is_port_available(port):
 
 
 def allocate_init_ports(
-        port: Optional[int] = None,
-        additional_ports: Optional[List[int]] = None,
-        tp_size: int = 1,
-        dp_size: int = 1,
+    port: Optional[int] = None,
+    additional_ports: Optional[List[int]] = None,
+    dp_size: int = 1,
 ):
     """Allocate ports for all connections."""
     if additional_ports:
@@ -170,8 +166,8 @@ def allocate_init_ports(
     ret_ports = list(set(x for x in ret_ports if is_port_available(x)))
     cur_port = ret_ports[-1] + 1 if len(ret_ports) > 0 else 10000
 
-    # HTTP + Tokenizer + Controller + Detokenizer + dp_size * (nccl + tp_size)
-    num_ports_needed = 4 + dp_size * (1 + tp_size)
+    # HTTP + Tokenizer + Controller + Detokenizer + dp_size * 1 (nccl)
+    num_ports_needed = 4 + dp_size
     while len(ret_ports) < num_ports_needed:
         if cur_port not in ret_ports and is_port_available(cur_port):
             ret_ports.append(cur_port)
@@ -381,49 +377,6 @@ def load_image(image_file):
     return image, image_size
 
 
-def connect_rpyc_service(host, port):
-    repeat_count = 0
-    while repeat_count < 20:
-        try:
-            con = rpyc.connect(
-                host,
-                port,
-                config={
-                    "allow_public_attrs": True,
-                    "allow_pickle": True,
-                    "sync_request_timeout": 3600,
-                },
-            )
-            break
-        except ConnectionRefusedError as e:
-            time.sleep(1)
-        repeat_count += 1
-    if repeat_count == 20:
-        raise RuntimeError(f"Connect rpyc error: {e}")
-
-    return con.root
-
-
-def start_rpyc_service(service: rpyc.Service, port: int):
-    t = ThreadedServer(
-        service=service,
-        port=port,
-        protocol_config={
-            "allow_public_attrs": True,
-            "allow_pickle": True,
-            "sync_request_timeout": 3600,
-        },
-    )
-    t.logger.setLevel(logging.WARN)
-    t.start()
-
-
-def start_rpyc_service_process(service: rpyc.Service, port: int):
-    proc = multiprocessing.Process(target=start_rpyc_service, args=(service, port))
-    proc.start()
-    return proc
-
-
 def suppress_other_loggers():
     from vllm.logger import logger as vllm_default_logger
 
@@ -522,6 +475,7 @@ def monkey_patch_vllm_p2p_access_check(gpu_id: int):
     """
 
     import vllm.distributed.device_communicators.custom_all_reduce_utils as tgt
+
     setattr(tgt, "gpu_p2p_access_check", lambda *arg, **kwargs: True)
 
 
@@ -551,7 +505,7 @@ def monkey_patch_vllm_dummy_weight_loader():
         model_config: ModelConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        multi_modal_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
@@ -562,7 +516,7 @@ def monkey_patch_vllm_dummy_weight_loader():
                     model_config,
                     self.load_config,
                     lora_config,
-                    multi_modal_config,
+                    multimodal_config,
                     cache_config,
                 )
 

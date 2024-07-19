@@ -29,7 +29,7 @@ class ServerArgs:
     max_prefill_tokens: Optional[int] = None
     max_running_requests: Optional[int] = None
     schedule_heuristic: str = "lpm"
-    schedule_conservativeness: float = 1.0
+    schedule_conservativeness: float = 0.8
 
     # Other runtime options
     tp_size: int = 1
@@ -53,6 +53,7 @@ class ServerArgs:
     disable_flashinfer: bool = False
     disable_radix_cache: bool = False
     disable_regex_jump_forward: bool = False
+    disable_cuda_graph: bool = True
     disable_disk_cache: bool = False
     attention_reduce_in_fp32: bool = False
     enable_p2p_check: bool = False
@@ -66,14 +67,16 @@ class ServerArgs:
         if self.tokenizer_path is None:
             self.tokenizer_path = self.model_path
         if self.mem_fraction_static is None:
-            if self.tp_size >= 8:
-                self.mem_fraction_static = 0.80
+            if self.tp_size >= 16:
+                self.mem_fraction_static = 0.74
+            elif self.tp_size >= 8:
+                self.mem_fraction_static = 0.78
             elif self.tp_size >= 4:
                 self.mem_fraction_static = 0.82
             elif self.tp_size >= 2:
                 self.mem_fraction_static = 0.85
             else:
-                self.mem_fraction_static = 0.90
+                self.mem_fraction_static = 0.88
         if isinstance(self.additional_ports, int):
             self.additional_ports = [self.additional_ports]
         elif self.additional_ports is None:
@@ -295,6 +298,11 @@ class ServerArgs:
             help="Disable regex jump-forward",
         )
         parser.add_argument(
+            "--disable-cuda-graph",
+            action="store_true",
+            help="Disable cuda graph.",
+        )
+        parser.add_argument(
             "--disable-disk-cache",
             action="store_true",
             help="Disable disk cache to avoid possible crashes related to file system or high concurrency.",
@@ -330,15 +338,8 @@ class ServerArgs:
 
 
 @dataclasses.dataclass
-class ModelPortArgs:
-    nccl_port: int
-    model_tp_ips: List[str]
-    model_tp_ports: List[int]
-
-
-@dataclasses.dataclass
 class PortArgs:
     tokenizer_port: int
-    router_port: int
+    controller_port: int
     detokenizer_port: int
-    model_port_args: List[ModelPortArgs]
+    nccl_ports: List[int]

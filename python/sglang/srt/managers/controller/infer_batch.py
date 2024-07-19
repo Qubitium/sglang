@@ -3,10 +3,11 @@
 import warnings
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import List, Union
+from typing import List, Union, Optional
 
 import numpy as np
 import torch
+from flashinfer.sampling import top_k_top_p_sampling_from_probs
 
 from sglang.srt.constrained import RegexGuide
 from sglang.srt.constrained.jump_forward import JumpForwardMap
@@ -18,8 +19,11 @@ INIT_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 
 class ForwardMode(IntEnum):
+    # Prefill a new sequence. This is deprecated now. "EXTEND" covers this case.
     PREFILL = auto()
+    # Extend a sequence. The KV cache of the first part of the sequence is already computed (e.g., system prompt).
     EXTEND = auto()
+    # Decode one token.
     DECODE = auto()
 
 
@@ -81,7 +85,10 @@ def apply_repetition_penalty(penalty: torch.Tensor, input_ids: List[int],
 
 
 class Req:
+    """Store all inforamtion of a request."""
+
     def __init__(self, rid, origin_input_text, origin_input_ids):
+        # Input and output info
         self.rid = rid
         self.origin_input_text = origin_input_text
         self.origin_input_ids_unpadded = origin_input_ids  # Before image padding
@@ -89,7 +96,15 @@ class Req:
         self.output_ids = []  # Each decode stage's output ids
         self.input_ids = None  # input_ids = origin_input_ids + output_ids
 
-        # For incremental decode
+        # For incremental decoding
+        # ----- | --------- read_ids -------|
+        # ----- |   surr_ids  |
+        # xxxxx | xxxxxxxxxxx | xxxxxxxxxxx |
+        # ----- ^ ----------- ^ ----------- ^
+        # ----- 1 ----------- 2 ----------- 3
+        # 1: surr_offset
+        # 2: read_offset
+        # 3: last token
         self.decoded_text = ""
         self.surr_offset = None  # Surrounding offset to defeat the cleanup algorithm
         self.read_offset = None
@@ -104,19 +119,18 @@ class Req:
         self.image_offset = 0
         self.pad_value = None
 
-        # Sampling parameters
-        self.sampling_params: SamplingParams = None
-        self.stream = False
-
-        self.tokenizer = None
-
-        # Check finish
-        self.finished_reason = None
-
         # Prefix info
         self.extend_input_len = 0
         self.prefix_indices = []
         self.last_node = None
+
+        # Sampling parameters
+        self.sampling_params = None
+        self.stream = False
+
+        # Check finish
+        self.tokenizer = None
+        self.finished_reason = None
 
         # Logprobs
         self.return_logprob = False
@@ -141,7 +155,7 @@ class Req:
         return self.finished_reason is not None
 
     # Based on https://github.com/vllm-project/vllm/blob/7a64d24aad69e4d2548aa0bf528d9fe63428ab01/vllm/transformers_utils/detokenizer.py#L194-L313
-    def init_detokenize_incrementally(self):
+    def init_incremental_detokenize(self):
         first_iter = self.surr_offset is None or self.read_offset is None
 
         if first_iter:
@@ -151,13 +165,11 @@ class Req:
             )
 
         all_ids = self.origin_input_ids_unpadded + self.output_ids
-        surr_ids = all_ids[self.surr_offset : self.read_offset]
-        read_ids = all_ids[self.surr_offset :]
+        return all_ids[self.surr_offset :], self.read_offset - self.surr_offset
 
-        return surr_ids, read_ids, len(all_ids)
-
-    def detokenize_incrementally(self, inplace: bool = True):
-        surr_ids, read_ids, num_all_tokens = self.init_detokenize_incrementally()
+    def get_next_inc_detokenization(self):
+        read_ids, read_offset = self.init_incremental_detokenize()
+        surr_ids = read_ids[:read_offset]
 
         surr_text = self.tokenizer.decode(
             surr_ids,
@@ -171,18 +183,9 @@ class Req:
         )
 
         if len(new_text) > len(surr_text) and not new_text.endswith("�"):
-            new_text = new_text[len(surr_text) :]
-            if inplace:
-                self.decoded_text += new_text
-                self.surr_offset = self.read_offset
-                self.read_offset = num_all_tokens
-
-            return True, new_text
+            return True, new_text[len(surr_text) :]
 
         return False, ""
-
-    def max_new_tokens(self):
-        return self.sampling_params.max_new_tokens
 
     def check_finished(self):
         if self.finished():
@@ -267,35 +270,33 @@ class Req:
 
 @dataclass
 class Batch:
+    """Store all inforamtion of a batch."""
+
+    # Request, memory pool, and cache
     reqs: List[Req]
     req_to_token_pool: ReqToTokenPool
     token_to_kv_pool: TokenToKVPool
     tree_cache: RadixCache
 
-    # batched arguments to model runner
+    # Batched arguments to model runner
     input_ids: torch.Tensor = None
     req_pool_indices: torch.Tensor = None
     seq_lens: torch.Tensor = None
     prefix_lens: torch.Tensor = None
     position_ids_offsets: torch.Tensor = None
     out_cache_loc: torch.Tensor = None
-    out_cache_cont_start: torch.Tensor = None
-    out_cache_cont_end: torch.Tensor = None
+    extend_num_tokens: int = None
 
-    # for processing logprobs
+    # For processing logprobs
     return_logprob: bool = False
     top_logprobs_nums: List[int] = None
 
-    # for multimodal
+    # For multimodal
     pixel_values: List[torch.Tensor] = None
     image_sizes: List[List[int]] = None
     image_offsets: List[int] = None
 
-    # other arguments for control
-    output_ids: torch.Tensor = None
-    extend_num_tokens: int = None
-
-    # batched sampling params
+    # Batched sampling params
     temperatures: torch.Tensor = None
     top_ps: torch.Tensor = None
     top_ks: torch.Tensor = None
@@ -320,8 +321,8 @@ class Batch:
     def is_empty(self):
         return len(self.reqs) == 0
 
-    # whether batch has at least 1 streaming request
     def has_stream(self) -> bool:
+        # Return whether batch has at least 1 streaming request
         return any(r.stream for r in self.reqs)
 
     def custom_logits_processors(self) -> List[List[CustomLogitsProcessor]]:
@@ -341,6 +342,13 @@ class Batch:
         seq_lens = []
 
         req_pool_indices = self.req_to_token_pool.alloc(bs)
+
+        if req_pool_indices is None:
+            raise RuntimeError(
+                "Out of memory. "
+                "Please set a smaller number for `--max-running-requests`."
+            )
+
         req_pool_indices_cpu = req_pool_indices.cpu().numpy()
         for i in range(bs):
             flatten_input_ids.extend(input_ids[i])
@@ -358,12 +366,12 @@ class Batch:
 
         position_ids_offsets = torch.zeros((bs,), dtype=torch.int32, device=device)
 
-        # Alloc mem
+        # Allocate memory
         seq_lens, prefix_lens = np.array(seq_lens), np.array(prefix_lens)
         extend_num_tokens = seq_lens.sum() - prefix_lens.sum()
         out_cache_loc = self.token_to_kv_pool.alloc(extend_num_tokens)
         if out_cache_loc is None:
-            self.tree_cache.evict(extend_num_tokens, self.token_to_kv_pool.dec_refs)
+            self.tree_cache.evict(extend_num_tokens, self.token_to_kv_pool.free)
             out_cache_loc = self.token_to_kv_pool.alloc(extend_num_tokens)
 
             if out_cache_loc is None:
@@ -417,10 +425,10 @@ class Batch:
 
         self.top_ps = torch.tensor(
             [r.sampling_params.top_p for r in reqs], dtype=torch.float, device=device
-        ).view(-1, 1)
+        )
         self.top_ks = torch.tensor(
             [r.sampling_params.top_k for r in reqs], dtype=torch.int, device=device
-        ).view(-1, 1)
+        )
 
         has_frequency_penalties = any(r.sampling_params.frequency_penalty != 0.0 for r in self.reqs)
         if has_frequency_penalties:
@@ -451,7 +459,7 @@ class Batch:
         if self.token_to_kv_pool.available_size() >= bs:
             return True
 
-        self.tree_cache.evict(bs, self.token_to_kv_pool.dec_refs)
+        self.tree_cache.evict(bs, self.token_to_kv_pool.free)
 
         if self.token_to_kv_pool.available_size() >= bs:
             return True
@@ -482,7 +490,7 @@ class Batch:
             token_indices = self.req_to_token_pool.req_to_token[
                 req_pool_indices_cpu[idx]
             ][last_uncached_pos : seq_lens_cpu[idx]]
-            self.token_to_kv_pool.dec_refs(token_indices)
+            self.token_to_kv_pool.free(token_indices)
 
             # release the last node
             self.tree_cache.dec_lock_ref(req.last_node)
@@ -531,7 +539,7 @@ class Batch:
                     cur_output_ids = req.output_ids
 
                     req.output_ids.extend(suffix_ids)
-                    decode_res, new_text = req.detokenize_incrementally(inplace=False)
+                    decode_res, new_text = req.get_next_inc_detokenization()
                     if not decode_res:
                         req.output_ids = cur_output_ids
                         continue
@@ -593,21 +601,12 @@ class Batch:
 
         # Alloc mem
         bs = len(self.reqs)
-        alloc_res = self.token_to_kv_pool.alloc_contiguous(bs)
-        if alloc_res is None:
-            self.out_cache_loc = self.token_to_kv_pool.alloc(bs)
+        self.out_cache_loc = self.token_to_kv_pool.alloc(bs)
 
-            if self.out_cache_loc is None:
-                print("Decode out of memory. This should nerver happen.")
-                self.tree_cache.pretty_print()
-                exit()
-
-            self.out_cache_cont_start = None
-            self.out_cache_cont_end = None
-        else:
-            self.out_cache_loc = alloc_res[0]
-            self.out_cache_cont_start = alloc_res[1]
-            self.out_cache_cont_end = alloc_res[2]
+        if self.out_cache_loc is None:
+            print("Decode out of memory. This should never happen.")
+            self.tree_cache.pretty_print()
+            exit()
 
         self.req_to_token_pool.req_to_token[
             self.req_pool_indices, self.seq_lens - 1
@@ -621,7 +620,7 @@ class Batch:
         self.req_pool_indices = self.req_pool_indices[new_indices]
         self.prefix_lens = None
         self.position_ids_offsets = self.position_ids_offsets[new_indices]
-        self.out_cache_loc = self.out_cache_cont_start = self.out_cache_cont_end = None
+        self.out_cache_loc = None
         self.top_logprobs_nums = [self.top_logprobs_nums[i] for i in unfinished_indices]
         self.return_logprob = any(req.return_logprob for req in self.reqs)
 
@@ -650,7 +649,7 @@ class Batch:
         self.position_ids_offsets = torch.concat(
             [self.position_ids_offsets, other.position_ids_offsets]
         )
-        self.out_cache_loc = self.out_cache_cont_start = self.out_cache_cont_end = None
+        self.out_cache_loc = None
         self.top_logprobs_nums.extend(other.top_logprobs_nums)
         self.return_logprob = any(req.return_logprob for req in self.reqs)
 
@@ -750,14 +749,17 @@ class Batch:
 
         # TODO(lmzheng): apply penalty
         probs = torch.softmax(logits, dim=-1)
-        probs_sort, probs_idx = _top_p_top_k(probs, self.top_ps, self.top_ks)
-        sampled_index = torch.multinomial(probs_sort, num_samples=1)
-        batch_next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index).view(
-            -1
-        )
-        batch_next_token_probs = torch.gather(
-            probs_sort, dim=1, index=sampled_index
-        ).view(-1)
+        try:
+            max_top_k_round, batch_size = 32, probs.shape[0]
+            uniform_samples = torch.rand(
+                (max_top_k_round, batch_size), device=probs.device
+            )
+            batch_next_token_ids, _ = top_k_top_p_sampling_from_probs(
+                probs, uniform_samples, self.top_ks, self.top_ps
+            )
+        except RuntimeError as e:
+            warnings.warn(f"Ignore errors in sampling: {e}")
+            batch_next_token_ids = torch.argmax(probs, dim=-1)
 
         if has_regex:
             batch_next_token_ids_cpu = batch_next_token_ids.cpu().numpy()
@@ -767,15 +769,221 @@ class Batch:
                         req.regex_fsm_state, batch_next_token_ids_cpu[i]
                     )
 
-        return batch_next_token_ids, batch_next_token_probs
+        return batch_next_token_ids
+
+@dataclass
+class InputMetadata:
+    """Store all inforamtion of a forward pass."""
+
+    forward_mode: ForwardMode
+    batch_size: int
+    total_num_tokens: int
+    req_pool_indices: torch.Tensor
+    seq_lens: torch.Tensor
+    positions: torch.Tensor
+    req_to_token_pool: ReqToTokenPool
+    token_to_kv_pool: TokenToKVPool
+
+    # For extend
+    extend_seq_lens: torch.Tensor
+    extend_start_loc: torch.Tensor
+    extend_no_prefix: bool
+
+    # Output location of the KV cache
+    out_cache_loc: torch.Tensor = None
+
+    # Output options
+    return_logprob: bool = False
+    top_logprobs_nums: List[int] = None
+
+    # Trition attention backend
+    triton_max_seq_len: int = 0
+    triton_max_extend_len: int = 0
+    triton_start_loc: torch.Tensor = None
+    triton_prefix_lens: torch.Tensor = None
+
+    # FlashInfer attention backend
+    flashinfer_prefill_wrapper_ragged: "BatchPrefillWithRaggedKVCacheWrapper" = None
+    flashinfer_prefill_wrapper_paged: "BatchPrefillWithPagedKVCacheWrapper" = None
+    flashinfer_decode_wrapper: "BatchDecodeWithPagedKVCacheWrapper" = None
+
+    logits_processors: Optional[List[List[CustomLogitsProcessor]]] = None
+
+    @classmethod
+    def create(
+        cls,
+        model_runner,
+        forward_mode,
+        req_pool_indices,
+        seq_lens,
+        prefix_lens,
+        position_ids_offsets,
+        out_cache_loc,
+        top_logprobs_nums=None,
+        return_logprob=False,
+        skip_flashinfer_init=False,
+        logits_processors=None,
+    ):
+        if not skip_flashinfer_init and not model_runner.server_args.disable_flashinfer:
+            init_flashinfer_args(
+                forward_mode,
+                model_runner,
+                req_pool_indices,
+                seq_lens,
+                prefix_lens,
+                model_runner.flashinfer_decode_wrapper,
+            )
+
+        batch_size = len(req_pool_indices)
+
+        if forward_mode == ForwardMode.DECODE:
+            positions = ((seq_lens - 1) + position_ids_offsets).to(torch.int64)
+            extend_seq_lens = extend_start_loc = extend_no_prefix = None
+            if not model_runner.server_args.disable_flashinfer:
+                # This variable is not needed in this case,
+                # we do not compute it to make it compatbile with cuda graph.
+                total_num_tokens = None
+            else:
+                total_num_tokens = int(torch.sum(seq_lens))
+        else:
+            seq_lens_cpu = seq_lens.cpu().numpy()
+            prefix_lens_cpu = prefix_lens.cpu().numpy()
+            position_ids_offsets_cpu = position_ids_offsets.cpu().numpy()
+            positions = torch.tensor(
+                np.concatenate(
+                    [
+                        np.arange(
+                            prefix_lens_cpu[i] + position_ids_offsets_cpu[i],
+                            seq_lens_cpu[i] + position_ids_offsets_cpu[i],
+                        )
+                        for i in range(batch_size)
+                    ],
+                    axis=0,
+                ),
+                device="cuda",
+            )
+            extend_seq_lens = seq_lens - prefix_lens
+            extend_start_loc = torch.zeros_like(seq_lens)
+            extend_start_loc[1:] = torch.cumsum(extend_seq_lens[:-1], dim=0)
+            extend_no_prefix = torch.all(prefix_lens == 0)
+            total_num_tokens = int(torch.sum(seq_lens))
+
+        ret = cls(
+            forward_mode=forward_mode,
+            batch_size=batch_size,
+            total_num_tokens=total_num_tokens,
+            req_pool_indices=req_pool_indices,
+            seq_lens=seq_lens,
+            positions=positions,
+            req_to_token_pool=model_runner.req_to_token_pool,
+            token_to_kv_pool=model_runner.token_to_kv_pool,
+            out_cache_loc=out_cache_loc,
+            extend_seq_lens=extend_seq_lens,
+            extend_start_loc=extend_start_loc,
+            extend_no_prefix=extend_no_prefix,
+            return_logprob=return_logprob,
+            top_logprobs_nums=top_logprobs_nums,
+            flashinfer_prefill_wrapper_ragged=model_runner.flashinfer_prefill_wrapper_ragged,
+            flashinfer_prefill_wrapper_paged=model_runner.flashinfer_prefill_wrapper_paged,
+            flashinfer_decode_wrapper=model_runner.flashinfer_decode_wrapper,
+            logits_processors=logits_processors,
+        )
+
+        if model_runner.server_args.disable_flashinfer:
+            (
+                ret.triton_max_seq_len,
+                ret.triton_max_extend_len,
+                ret.triton_start_loc,
+                ret.triton_prefix_lens,
+            ) = init_triton_args(forward_mode, seq_lens, prefix_lens)
+
+        return ret
 
 
-def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):
-    probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
-    probs_sum = torch.cumsum(probs_sort, dim=-1)
-    probs_sort[(probs_sum - probs_sort) > top_ps] = 0.0
-    probs_sort[
-        torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1) >= top_ks
-        ] = 0.0
-    probs_sort.div_(probs_sort.max(dim=-1, keepdim=True)[0])
-    return probs_sort, probs_idx
+def init_flashinfer_args(
+    forward_mode,
+    model_runner,
+    req_pool_indices,
+    seq_lens,
+    prefix_lens,
+    flashinfer_decode_wrapper,
+):
+    """Init auxiliary variables for FlashInfer attention backend."""
+    num_qo_heads = model_runner.model_config.num_attention_heads // model_runner.tp_size
+    num_kv_heads = model_runner.model_config.get_num_kv_heads(model_runner.tp_size)
+    head_dim = model_runner.model_config.head_dim
+    batch_size = len(req_pool_indices)
+
+    if forward_mode == ForwardMode.DECODE:
+        paged_kernel_lens = seq_lens
+    else:
+        paged_kernel_lens = prefix_lens
+
+    kv_indptr = torch.zeros((batch_size + 1,), dtype=torch.int32, device="cuda")
+    kv_indptr[1:] = torch.cumsum(paged_kernel_lens, dim=0)
+    req_pool_indices_cpu = req_pool_indices.cpu().numpy()
+    paged_kernel_lens_cpu = paged_kernel_lens.cpu().numpy()
+    kv_indices = torch.cat(
+        [
+            model_runner.req_to_token_pool.req_to_token[
+                req_pool_indices_cpu[i], : paged_kernel_lens_cpu[i]
+            ]
+            for i in range(batch_size)
+        ],
+        dim=0,
+    ).contiguous()
+    kv_last_page_len = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
+
+    if forward_mode == ForwardMode.DECODE:
+        flashinfer_decode_wrapper.end_forward()
+        flashinfer_decode_wrapper.begin_forward(
+            kv_indptr,
+            kv_indices,
+            kv_last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            1,
+        )
+    else:
+        # extend part
+        qo_indptr = torch.zeros((batch_size + 1,), dtype=torch.int32, device="cuda")
+        qo_indptr[1:] = torch.cumsum(seq_lens - prefix_lens, dim=0)
+
+        model_runner.flashinfer_prefill_wrapper_ragged.end_forward()
+        model_runner.flashinfer_prefill_wrapper_ragged.begin_forward(
+            qo_indptr,
+            qo_indptr,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+        )
+
+        # cached part
+        model_runner.flashinfer_prefill_wrapper_paged.end_forward()
+        model_runner.flashinfer_prefill_wrapper_paged.begin_forward(
+            qo_indptr,
+            kv_indptr,
+            kv_indices,
+            kv_last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            1,
+        )
+
+
+def init_triton_args(forward_mode, seq_lens, prefix_lens):
+    """Init auxiliary variables for triton attention backend."""
+    batch_size = len(seq_lens)
+    max_seq_len = int(torch.max(seq_lens))
+    start_loc = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
+    start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+
+    if forward_mode == ForwardMode.DECODE:
+        max_extend_len = None
+    else:
+        extend_seq_lens = seq_lens - prefix_lens
+        max_extend_len = int(torch.max(extend_seq_lens))
+
+    return max_seq_len, max_extend_len, start_loc, prefix_lens

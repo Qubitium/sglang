@@ -124,6 +124,16 @@ class RuntimeEndpoint(BaseBackend):
         else:
             raise RuntimeError(f"Invalid dtype: {sampling_params.dtype}")
 
+        for item in [
+            "return_logprob",
+            "logprob_start_len",
+            "top_logprobs_num",
+            "return_text_in_logprobs",
+        ]:
+            value = getattr(sampling_params, item, None)
+            if value is not None:
+                data[item] = value
+
         self._add_images(s, data)
 
         res = http_request(
@@ -165,6 +175,16 @@ class RuntimeEndpoint(BaseBackend):
             }
         else:
             raise RuntimeError(f"Invalid dtype: {sampling_params.dtype}")
+
+        for item in [
+            "return_logprob",
+            "logprob_start_len",
+            "top_logprobs_num",
+            "return_text_in_logprobs",
+        ]:
+            value = getattr(sampling_params, item, None)
+            if value is not None:
+                data[item] = value
 
         data["stream"] = True
         self._add_images(s, data)

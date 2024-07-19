@@ -1,14 +1,18 @@
 """A controller that manages a group of tensor parallel workers."""
 
-import asyncio
 import logging
-import multiprocessing as mp
 import queue
 from concurrent.futures import ThreadPoolExecutor
 
+import multiprocessing
+import os
+from typing import List
 
-from sglang.global_config import global_config
-from sglang.srt.managers.controller.tp_worker import ModelTpClient
+from sglang.srt.managers.controller.tp_worker import (
+    ModelTpServer,
+    broadcast_recv_input,
+    launch_tp_servers,
+)
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import kill_parent_process
 from sglang.utils import get_exception_traceback
@@ -19,20 +23,68 @@ logger = logging.getLogger("srt.controller")
 
 
 class ControllerSingle:
-    def __init__(self, model_client: ModelTpClient, router_chan: mp.Queue, detokenzier_chan: mp.Queue,
-                 idle_chan: mp.Queue):
+    """A controller that manages a group of tensor parallel workers."""
+    def __init__(self, router_chan: multiprocessing.Queue, detokenzier_chan: multiprocessing.Queue,
+                 idle_chan: multiprocessing.Queue, server_args: ServerArgs, port_args: PortArgs, model_overide_args: dict,
+        gpu_ids: List[int],
+        is_data_parallel_worker: bool,
+        dp_worker_id: int,
+        mp_queue: multiprocessing.Queue,):
         # Init status
-        self.model_client = model_client
         self.router_chan = router_chan
         self.detokenizer_chan = detokenzier_chan
         self.idle_chan = idle_chan
 
-        # Init some configs
-        self.request_dependency_delay = global_config.request_dependency_delay
+        # Parse args
+        self.tp_size = server_args.tp_size
+        self.is_dp_worker = is_data_parallel_worker
+        self.dp_worker_id = dp_worker_id
+        self.mp_queue = mp_queue
 
-    async def loop_for_forward(self):
+
+        # Launch other tp ranks
+        tp_size_local = server_args.tp_size // server_args.nnodes
+        self.tp_procs = []
+        if tp_size_local > 1:
+            tp_rank_range = range(1, tp_size_local)
+            self.tp_procs = launch_tp_servers(
+                gpu_ids,
+                tp_rank_range,
+                server_args,
+                port_args.nccl_ports[dp_worker_id],
+                model_overide_args,
+            )
+
+        # Launch tp rank 0
+        self.tp_server = ModelTpServer(
+            gpu_ids[0],
+            0,
+            server_args,
+            port_args.nccl_ports[dp_worker_id],
+            model_overide_args,
+        )
+        self.tp_cpu_group = self.tp_server.model_runner.tp_group.cpu_group
+
+    def loop_for_forward(self):
         idle = True
         while True:
+            if not self.is_dp_worker:
+                recv_reqs, idle = self.recv_requests_from_zmq(idle)
+            else:
+                recv_reqs = self.recv_requests_from_mp_queue()
+
+            if self.tp_size > 1:
+                broadcast_recv_input(recv_reqs, 0, self.tp_cpu_group)
+
+            out_pyobjs = self.tp_server.exposed_step(recv_reqs)
+
+            for obj in out_pyobjs:
+                self.detokenizer_chan.put_nowait(obj)
+
+
+    def recv_requests_from_zmq(self, idle: bool):
+        recv_reqs = []
+        if not self.is_dp_worker:
             if not idle:
                 # print("forward check IDLE.....")
                 if not self.idle_chan.empty():
@@ -40,12 +92,10 @@ class ControllerSingle:
                     flush_queue(self.idle_chan)
                     idle = True
 
-            next_step_input = []
-
             if idle:
                 # print("forward IDLE WAIT")
                 recv_obj = self.router_chan.get()
-                next_step_input.append(recv_obj)
+                recv_reqs.append(recv_obj)
 
                 if isinstance(recv_obj, AbortReq):
                     pass
@@ -58,62 +108,78 @@ class ControllerSingle:
                 # print("CPU SPIN LOOP")
 
             # if not idle, model is doing work, disable wait and set to 0ms
-            wait_timeout = 0.010 if len(next_step_input) == 1 else 0.0
+            wait_timeout = 0.010 if len(recv_reqs) == 1 else 0.0
             while True:
                 try:
                     if wait_timeout == 0.0:
-                        next_step_input.append(self.router_chan.get(block=False))
+                        recv_reqs.append(self.router_chan.get(block=False))
                     else:
-                        next_step_input.append(self.router_chan.get(block=True, timeout=wait_timeout))
+                        recv_reqs.append(self.router_chan.get(block=True, timeout=wait_timeout))
                         wait_timeout = max(0.0, wait_timeout - 0.02)
                 except queue.Empty:
                     break
 
             # print(f"model_client.step wait...")
-            if len(next_step_input) > 0:
-                print(f"manager_single Forward Requests batch size: {len(next_step_input)}")
+            if len(recv_reqs) > 0:
+                print(f"manager_single Forward Requests batch size: {len(recv_reqs)}")
 
-            output = await self.model_client.step(next_step_input)
+        return recv_reqs, idle
 
-            for item in output:
-                self.detokenizer_chan.put_nowait(item)
+    def recv_requests_from_mp_queue(self):
+        recv_reqs = []
+        while not self.mp_queue.empty():
+            recv_reqs.append(self.mp_queue.get())
+        return recv_reqs
 
 
 def start_controller_process(
-        server_args: ServerArgs,
-        port_args: PortArgs,
-        router_chan: mp.Queue,
-        detokenizer_chan: mp.Queue,
-        idle_chan: mp.Queue,
-        startup_chan: mp.Queue,
-        model_overide_args,
+    server_args: ServerArgs,
+    port_args: PortArgs,
+    router_chan: multiprocessing.Queue,
+    detokenizer_chan: multiprocessing.Queue,
+    idle_chan: multiprocessing.Queue,
+    startup_chan: multiprocessing.Queue,
+    model_overide_args: dict,
+    is_data_parallel_worker: bool = False,
+    gpu_ids: List[int] = None,
+    dp_worker_id: int = None,
+    queue: multiprocessing.connection.Connection = None,
 ):
+    """Start a controller process."""
+
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
         format="%(message)s",
     )
 
-    try:
+    if not is_data_parallel_worker:
         tp_size_local = server_args.tp_size // server_args.nnodes
-        model_client = ModelTpClient(
-            [i for _ in range(server_args.nnodes) for i in range(tp_size_local)],
+        gpu_ids = [i for _ in range(server_args.nnodes) for i in range(tp_size_local)]
+        dp_worker_id = 0
+        queue = None
+
+    try:
+        controller = ControllerSingle(
+            router_chan, detokenizer_chan, idle_chan,
             server_args,
-            port_args.model_port_args[0],
+            port_args,
             model_overide_args,
+            gpu_ids,
+            is_data_parallel_worker,
+            dp_worker_id,
+            queue,
         )
-        controller = ControllerSingle(model_client, router_chan, detokenizer_chan, idle_chan)
     except Exception:
         startup_chan.put_nowait(get_exception_traceback())
         raise
 
     startup_chan.put_nowait("init ok")
 
-    loop = asyncio.new_event_loop()
-    loop.set_default_executor(ThreadPoolExecutor(max_workers=256))
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(controller.loop_for_forward())
+        controller.loop_for_forward()
     except Exception:
         logger.error("Exception in ControllerSingle:\n" + get_exception_traceback())
     finally:
+        for t in controller.tp_procs:
+            os.kill(t.pid, 9)
         kill_parent_process()

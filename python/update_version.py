@@ -6,7 +6,7 @@ def update_version_in_pyproject(file_path: str):
     with open(file_path, 'r') as file:
         pyproject_data = toml.load(file)
     now = datetime.datetime.now()
-    new_version = f"999.1.17+dev{now.strftime('%Y%m%d%H%M%S')}"
+    new_version = f"999.1.21+dev{now.strftime('%Y%m%d%H%M%S')}"
 
     pyproject_data['project']['version'] = new_version
 
