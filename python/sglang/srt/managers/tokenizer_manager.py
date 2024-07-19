@@ -171,7 +171,7 @@ class TokenizerManager:
                 top_logprobs_num=obj.top_logprobs_num,
                 stream=obj.stream,
             )
-            print("tokenized_obj",tokenized_obj)
+            # print("tokenized_obj",tokenized_obj)
             # no need to wait
             asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
 
@@ -179,11 +179,11 @@ class TokenizerManager:
             state = ReqState([], False, event)
             self.rid_to_state[rid] = state
             self.pending += 1
-            print(f"PENDING {self.pending}")
-            print(f"tokenizer generate_request single request")
+            # print(f"PENDING {self.pending}")
+            # print(f"tokenizer generate_request single request")
 
             while True:
-                print(f"tokenizer generate request single wait for event rid: {rid}")
+                # print(f"tokenizer generate request single wait for event rid: {rid}")
                 try:
                     await asyncio.wait_for(event.wait(), timeout=4)
                 except asyncio.TimeoutError:
@@ -202,17 +202,17 @@ class TokenizerManager:
                 if self.server_args.log_requests and state.finished:
                     logger.info(f"in={obj.text}, out={out}")
 
-                print(f"tokenizer generate request single wait for event done rid: {rid}")
+                # print(f"tokenizer generate request single wait for event done rid: {rid}")
                 state.out_list = []
                 if state.finished:
                     self.pending -= 1
                     assert self.pending >= 0
                     if self.pending == 0:
-                        print("PENDING state.finished => empty rid_stats! signal!")
+                        # print("PENDING state.finished => empty rid_stats! signal!")
                         asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
                     else:
-                        # pass
-                        print(f"PENDING size: {self.pending}")
+                        pass
+                        # print(f"PENDING size: {self.pending}")
 
                     del self.rid_to_state[rid]
 
