@@ -73,7 +73,7 @@ class ControllerSingle:
         idle = True
         while True:
             if not self.is_dp_worker:
-                recv_reqs, idle = self.recv_requests_from_zmq(idle)
+                recv_reqs, idle = self.recv_requests(idle)
             else:
                 recv_reqs = self.recv_requests_from_mp_queue()
 
@@ -85,7 +85,7 @@ class ControllerSingle:
             for obj in out_pyobjs:
                 self.detokenizer_chan.put_nowait(obj)
 
-    def recv_requests_from_zmq(self, idle: bool):
+    def recv_requests(self, idle: bool):
         recv_reqs = []
         if not self.is_dp_worker:
             if not idle:
@@ -176,7 +176,7 @@ def start_controller_process(
         startup_chan.put_nowait(get_exception_traceback())
         raise
 
-    startup_chan.put_nowait("init ok")
+    startup_chan.put("init ok")
 
     try:
         controller.loop_for_forward()
