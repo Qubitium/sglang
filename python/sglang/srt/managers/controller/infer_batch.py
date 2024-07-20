@@ -780,6 +780,7 @@ class InputMetadata:
     total_num_tokens: int
     req_pool_indices: torch.Tensor
     seq_lens: torch.Tensor
+    prefix_lens: torch.Tensor
     positions: torch.Tensor
     req_to_token_pool: ReqToTokenPool
     token_to_kv_pool: TokenToKVPool
@@ -874,6 +875,7 @@ class InputMetadata:
             total_num_tokens=total_num_tokens,
             req_pool_indices=req_pool_indices,
             seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
             positions=positions,
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,

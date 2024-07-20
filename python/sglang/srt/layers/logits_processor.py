@@ -149,7 +149,7 @@ class LogitsProcessor(nn.Module):
             else:  # If it is the first forward of a batch, last_id needs to be obtained based on index.
                 last_ids = []
                 for i, seq_len in enumerate(input_metadata.seq_lens):
-                    prefix_len = input_metadata.extend_seq_lens[i]
+                    prefix_len = input_metadata.prefix_lens[i]
                     last_ids.append(input_ids_list[seq_len - prefix_len - 1])
             for i, logits_processors in enumerate(input_metadata.logits_processors):
                 last_id = last_ids[i]

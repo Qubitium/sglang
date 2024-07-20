@@ -39,6 +39,12 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 logger = logging.getLogger(__name__)
 
+@dataclasses.dataclass
+class DecodeStatus:
+    decoded_text: str
+    decode_ids: List[int]
+    surr_offset: int
+    read_offset: int
 
 @dataclasses.dataclass
 class ReqState:
@@ -98,6 +104,8 @@ class TokenizerManager:
         self.to_create_loop = True
         self.rid_to_state: Dict[str, ReqState] = {}
         self.decoder_task = None
+
+        self.decode_status = {}
 
     async def start(self):
         if self.decoder_task is None:
@@ -367,15 +375,35 @@ class TokenizerManager:
             # print(f"detokenizer detokenizer_chan get done: {recv_token_out}")
 
             # The following code is from handle_loop() in detokenizer_manager.py
+            bs = len(recv_token_out.rids)
+            # FIXME: incremental detokenize is not compatible with jump forward
+            # Initialize decode status
+            read_ids, surr_ids = [], []
+            for i in range(bs):
+                rid = recv_token_out.rids[i]
+                if rid not in self.decode_status:
+                    s = DecodeStatus(
+                        decoded_text=recv_token_out.decoded_texts[i],
+                        decode_ids=recv_token_out.decode_ids[i],
+                        surr_offset=0,
+                        read_offset=recv_token_out.read_offsets[i],
+                    )
+                    self.decode_status[rid] = s
+                else:
+                    s = self.decode_status[rid]
+                    s.decode_ids = recv_token_out.decode_ids[i]
+
+                read_ids.append(s.decode_ids[s.surr_offset:])
+                surr_ids.append(s.decode_ids[s.surr_offset: s.read_offset])
 
             # TODO(lmzheng): handle skip_special_tokens/spaces_between_special_tokens per request
             def batch_decode_surr():
-                return self.tokenizer.batch_decode(recv_token_out.surr_output_ids,
+                return self.tokenizer.batch_decode(surr_ids,
                                                    skip_special_tokens=recv_token_out.skip_special_tokens[0],
                                                    spaces_between_special_tokens=
                                                    recv_token_out.spaces_between_special_tokens[0])
             def batch_decode_read():
-                return self.tokenizer.batch_decode(recv_token_out.read_output_ids,
+                return self.tokenizer.batch_decode(read_ids,
                                                    skip_special_tokens=recv_token_out.skip_special_tokens[0],
                                                    spaces_between_special_tokens=
                                                    recv_token_out.spaces_between_special_tokens[0])

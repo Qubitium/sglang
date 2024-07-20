@@ -284,11 +284,11 @@ def launch_server(
         args=(
             server_args,
             port_args,
+            model_overide_args,
             router_chan,
             detokenizer_chan,
             idle_chan,
             startup_chan,
-            model_overide_args
         ),
         target=start_process,
     )
@@ -311,7 +311,7 @@ def launch_server(
     #     app.add_middleware(APIKeyValidatorMiddleware, api_key=server_args.api_key)
 
     # Send a warmup request
-    def _wait_and_warmup():
+    def _wait_and_warmup(server_args, pipe_finish_writer):
         headers = {}
         url = server_args.url()
         if server_args.api_key:
@@ -456,7 +456,7 @@ class Runtime:
 
         self.pid = os.getpid()
 
-        threading.Thread(target=launch_server, args=[self.server_args, tokenizer_init_chan, None, model_overide_args], daemon=True).start()
+        threading.Thread(target=launch_server, args=[self.server_args, tokenizer_init_chan, model_overide_args, None,], daemon=True).start()
 
         # try:
         #     init_state = pipe_reader.recv()

@@ -60,7 +60,6 @@ class ControllerMulti:
 
     def __init__(
             self,
-            load_balance_method: str,
             server_args: ServerArgs,
             port_args: PortArgs,
             model_overide_args,
@@ -68,8 +67,13 @@ class ControllerMulti:
             detokenzier_chan: multiprocessing.Queue,
             idle_chan: multiprocessing.Queue
     ):
-        self.load_balance_method = LoadBalanceMethod.from_str(load_balance_method)
+        # Parse args
         self.server_args = server_args
+        self.port_args = port_args
+        self.model_overide_args = model_overide_args
+        self.load_balance_method = LoadBalanceMethod.from_str(
+            server_args.load_balance_method
+        )
 
         # self.port_args = port_args
         self.router_chan = router_chan
@@ -97,9 +101,7 @@ class ControllerMulti:
     def start_dp_worker(self, dp_worker_id: int):
         tp_size = self.server_args.tp_size
 
-        pipe_controller_reader, pipe_controller_writer = multiprocessing.Pipe(
-            duplex=False
-        )
+        startup_chan = multiprocessing.Queue()
 
         gpu_ids = list(range(dp_worker_id * tp_size, (dp_worker_id + 1) * tp_size))
         queue = multiprocessing.Queue()
@@ -108,8 +110,11 @@ class ControllerMulti:
             args=(
                 self.server_args,
                 self.port_args,
-                pipe_controller_writer,
                 self.model_overide_args,
+                self.router_chan,
+                self.detokenizer_chan,
+                self.idle_chan,
+                startup_chan,
                 True,
                 gpu_ids,
                 dp_worker_id,
@@ -118,7 +123,7 @@ class ControllerMulti:
         )
         proc.start()
 
-        controller_init_state = pipe_controller_reader.recv()
+        controller_init_state = startup_chan.get()
         if controller_init_state != "init ok":
             raise RuntimeError(
                 f"Initialization failed. controller_init_state: {controller_init_state}"
@@ -143,35 +148,7 @@ class ControllerMulti:
             wid = np.argmin(queue_sizes)
             self.workers[wid].queue.put(r)
 
-
-    async def remove_dead_workers(self):
-        for i in list(self.workers.keys()):
-            worker_thread = self.workers[i]
-            if not worker_thread.liveness:
-                worker_thread.join()
-                # move unsuccessful requests back to the queue
-                while not worker_thread.request_queue.empty():
-                    self.recv_reqs.append(worker_thread.request_queue.get())
-                del self.workers[i]
-                logger.info(f"Stale worker {i} removed")
-
-    # async def loop_for_forward(self):
-    #     while True:
-    #         print("multi loop_for_forward 1")
-    #         await self.remove_dead_workers()
-    #         print("multi loop_for_forward 2")
-    #         if self.have_any_live_worker():
-    #             next_step_input = list(self.recv_reqs)
-    #             print("multi loop_for_forward 3",next_step_input)
-    #             self.recv_reqs = []
-    #             if next_step_input:
-    #                 await self.dispatching(next_step_input)
-    #         # else:
-    #         #    logger.error("There is no live worker.")
-    #
-    #         await asyncio.sleep(global_config.wait_for_new_request_delay)
-
-    async def loop_for_forward(self):
+    def loop_for_forward(self):
         idle = True
         while True:
             if not idle:
@@ -204,8 +181,6 @@ class ControllerMulti:
                 except queue.Empty:
                     break
 
-            await self.remove_dead_workers()
-
             next_step_input = list(self.recv_reqs)
             self.recv_reqs = []
             self.dispatching(next_step_input)
@@ -235,11 +210,11 @@ class ControllerMulti:
 def start_controller_process(
         server_args: ServerArgs,
         port_args: PortArgs,
+        model_overide_args,
         router_chan: multiprocessing.Queue,
         detokenizer_chan: multiprocessing.Queue,
         idle_chan: multiprocessing.Queue,
         startup_chan: multiprocessing.Queue,
-        model_overide_args,
 ):
     """Start a controller process."""
 
@@ -249,10 +224,8 @@ def start_controller_process(
     )
 
     try:
-        controller = ControllerMulti(
-            server_args.load_balance_method, server_args, port_args, model_overide_args, router_chan, detokenizer_chan,
-            idle_chan
-        )
+        controller = ControllerMulti(server_args, port_args, model_overide_args, router_chan, detokenizer_chan,
+                                     idle_chan)
     except Exception:
         startup_chan.put_nowait(get_exception_traceback())
         raise
@@ -261,9 +234,7 @@ def start_controller_process(
 
     # blocking
     try:
-        loop = asyncio.get_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(controller.loop_for_forward())
+        controller.loop_for_forward()
     except KeyboardInterrupt:
         print("Caught KeyboardInterrupt, terminating sglang process")
         try:
