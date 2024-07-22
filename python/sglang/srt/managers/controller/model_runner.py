@@ -43,8 +43,6 @@ from sglang.srt.utils import (
     monkey_patch_vllm_p2p_access_check,
 )
 
-from sglang.srt.sampling_params import CustomLogitsProcessor
-
 QUANTIONCONFIG_MAPPING = {"awq": AWQConfig, "gptq": GPTQConfig, "marlin": MarlinConfig}
 
 logger = logging.getLogger("srt.model_runner")
@@ -103,6 +101,10 @@ class ModelRunner:
                     "The memory capacity is unbalanced. Some GPUs may be occupied by other processes."
                 )
 
+        # following two dtypes are modified in load_model()
+        self.torch_dtype = torch.bfloat16
+        self.triton_dtype = triton.language.bfloat16
+
         # Load the model and create memory pool
         self.load_model()
         self.init_memory_pool(total_gpu_memory)
@@ -111,10 +113,6 @@ class ModelRunner:
 
         # Capture cuda graphs
         self.init_cuda_graphs()
-
-        # following two dtypes are modified in load_model()
-        self.torch_dtype = torch.bfloat16
-        self.triton_dtype = triton.language.bfloat16
 
     def load_model(self):
         logger.info(
@@ -179,7 +177,8 @@ class ModelRunner:
             seed=42,
             skip_tokenizer_init=True,
         )
-        self.dtype = self.torch_dtype
+        vllm_model_config.dtype = self.torch_dtype
+        self.dtype = vllm_model_config.dtype
         if self.model_config.model_overide_args is not None:
             vllm_model_config.hf_config.update(self.model_config.model_overide_args)
 
