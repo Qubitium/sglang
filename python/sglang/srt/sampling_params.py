@@ -27,6 +27,7 @@ class SamplingParams:
         dtype: Optional[str] = None,
         regex: Optional[str] = None,
         logits_processors: Optional[List[CustomLogitsProcessor]] = None,
+        n: int = 1,
     ) -> None:
         self.temperature = temperature
         self.top_p = top_p
@@ -42,6 +43,7 @@ class SamplingParams:
         self.dtype = dtype
         self.regex = regex
         self.logits_processors = logits_processors if logits_processors else []
+        self.n = n
 
         # Process some special cases
         if self.temperature < _SAMPLING_EPS:

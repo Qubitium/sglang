@@ -27,7 +27,7 @@ import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from sglang.backend.runtime_endpoint import RuntimeEndpoint
+from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
 from sglang.srt.constrained import disable_cache
 from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.controller.manager_multi import (
@@ -40,11 +40,12 @@ from sglang.srt.managers.controller.manager_single import (
 from sglang.srt.managers.detokenizer_manager import start_detokenizer_process
 from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
-from sglang.srt.openai_api_adapter import (
+from sglang.srt.openai_api.adapter import (
     load_chat_template_for_openai_api,
     v1_chat_completions,
     v1_completions,
 )
+from sglang.srt.openai_api.protocol import ModelCard, ModelList
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
     API_KEY_HEADER_NAME,
@@ -52,6 +53,7 @@ from sglang.srt.utils import (
     allocate_init_ports,
     assert_pkg_version,
     enable_show_time_cost,
+    set_ulimit,
 )
 from sglang.utils import get_exception_traceback
 
@@ -156,6 +158,16 @@ async def openai_v1_chat_completions(raw_request: Request):
     return await v1_chat_completions(tokenizer_manager, raw_request)
 
 
+@app.get("/v1/models")
+def available_models():
+    """Show available models."""
+    model_names = [tokenizer_manager.model_path]
+    model_cards = []
+    for model_name in model_names:
+        model_cards.append(ModelCard(id=model_name, root=model_name))
+    return ModelList(data=model_cards)
+
+
 def _set_global_server_args(server_args: ServerArgs):
     global global_server_args_dict
     global_server_args_dict = {
@@ -164,28 +176,17 @@ def _set_global_server_args(server_args: ServerArgs):
     }
 
 
-def _set_ulimit(target_soft_limit=65535):
-    import resource
+def _set_torch_compile_config():
+    # The following configurations are for torch compile optimizations
+    import torch._dynamo.config
+    import torch._inductor.config
 
-    resource_type = resource.RLIMIT_NOFILE
-    current_soft, current_hard = resource.getrlimit(resource_type)
+    torch._inductor.config.coordinate_descent_tuning = True
+    torch._inductor.config.triton.unique_kernel_names = True
+    torch._inductor.config.fx_graph_cache = True  # Experimental feature to reduce compilation times, will be on by default in future
 
-    if current_soft >= target_soft_limit:
-        logger.info(
-            f"Current limits are already sufficient: soft={current_soft}, hard={current_hard}"
-        )
-    else:
-        try:
-            resource.setrlimit(resource_type, (target_soft_limit, current_hard))
-            new_soft, new_hard = resource.getrlimit(resource_type)
-            logger.info(
-                f"Successfully set new limits: soft={new_soft}, hard={new_hard}"
-            )
-        except ValueError as e:
-            logger.warn(f"Failed to set new limits: {e}")
-            logger.info(
-                f"Limits remain unchanged: soft={current_soft}, hard={current_hard}"
-            )
+    # FIXME: tmp workaround
+    torch._dynamo.config.accumulated_cache_size_limit = 256
 
 
 def launch_server(
@@ -208,7 +209,7 @@ def launch_server(
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
     os.environ["NCCL_NVLS_ENABLE"] = "0"
-    _set_ulimit()
+    set_ulimit()
     if server_args.show_time_cost:
         enable_show_time_cost()
     if server_args.disable_disk_cache:
@@ -216,7 +217,7 @@ def launch_server(
     if not server_args.disable_flashinfer:
         assert_pkg_version(
             "flashinfer",
-            "0.1.0",
+            "0.1.1",
             "Please uninstall the old version and "
             "reinstall the latest version by following the instructions "
             "at https://docs.flashinfer.ai/installation.html.",
@@ -224,6 +225,10 @@ def launch_server(
     if server_args.chat_template:
         # TODO: replace this with huggingface transformers template
         load_chat_template_for_openai_api(server_args.chat_template)
+
+    if server_args.enable_torch_compile:
+        _set_torch_compile_config()
+
     _set_global_server_args(server_args)
 
     # Allocate ports

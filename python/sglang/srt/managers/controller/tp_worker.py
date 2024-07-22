@@ -308,6 +308,12 @@ class ModelTpServer:
             self.model_config.context_len - 1 - len(req.origin_input_ids),
             self.max_total_num_tokens - 128 - len(req.origin_input_ids),
         )
+        if req.sampling_params.max_new_tokens < 0:
+            req.origin_input_ids = req.origin_input_ids[
+                : self.max_total_num_tokens - 128
+            ]
+            logger.error("Request longer than memory pool size, truncated!!!")
+
         self.forward_queue.append(req)
 
     def get_new_prefill_batch(self) -> Optional[Batch]:
@@ -597,6 +603,7 @@ class ModelTpServer:
 
     def handle_finished_requests(self, batch: Batch):
         output_rids = []
+        output_vids = []
         decoded_texts = []
         output_read_ids = []
         output_read_offsets = []
@@ -622,6 +629,7 @@ class ModelTpServer:
                 )
             ):
                 output_rids.append(req.rid)
+                output_vids.append(req.vid)
                 decoded_texts.append(req.decoded_text)
                 read_ids, read_offset = req.init_incremental_detokenize()
                 output_read_ids.append(read_ids)
@@ -663,6 +671,7 @@ class ModelTpServer:
             self.out_pyobjs.append(
                 BatchTokenIDOut(
                     output_rids,
+                    output_vids,
                     decoded_texts,
                     output_read_ids,
                     output_read_offsets,

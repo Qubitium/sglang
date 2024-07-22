@@ -3,7 +3,8 @@
 import uuid
 from typing import Any, Dict, List, Optional
 
-from sglang.backend.base_backend import BaseBackend
+from sglang.global_config import global_config
+from sglang.lang.backend.base_backend import BaseBackend
 from sglang.lang.interpreter import ProgramState, ProgramStateGroup
 from sglang.lang.ir import (
     SglArgument,

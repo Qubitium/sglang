@@ -1,4 +1,4 @@
-## SRT Unit Tests
+# SRT Unit Tests
 
 ### Latency Alignment
 Make sure your changes do not slow down the following benchmarks
@@ -92,3 +92,9 @@ python3 run_all.py
 cd test/srt
 python test_openai_server.py
 ```
+
+## Format
+pip3 install pre-commit
+cd sglang
+pre-commit install
+pre-commit run --all-files

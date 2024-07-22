@@ -5,6 +5,7 @@ import fcntl
 import logging
 import os
 import random
+import resource
 import socket
 import struct
 import time
@@ -192,71 +193,6 @@ def get_int_token_logit_bias(tokenizer, vocab_size):
             logit_bias[t_id] = -1e5
 
     return logit_bias
-
-
-def wrap_kernel_launcher(kernel):
-    """A faster launcher for triton kernels."""
-    if int(triton.__version__.split(".")[0]) >= 3:
-        return None
-
-    gpu_id = torch.cuda.current_device()
-    kernels = kernel.cache[gpu_id].values()
-    kernel = next(iter(kernels))
-
-    # Different trition versions use different low-level names
-    if hasattr(kernel, "cu_function"):
-        kfunction = kernel.cu_function
-    else:
-        kfunction = kernel.function
-
-    if hasattr(kernel, "c_wrapper"):
-        run = kernel.c_wrapper
-    else:
-        run = kernel.run
-
-    add_cluster_dim = True
-
-    def ret_func(grid, num_warps, *args):
-        nonlocal add_cluster_dim
-
-        try:
-            if add_cluster_dim:
-                run(
-                    grid[0],
-                    grid[1],
-                    grid[2],
-                    num_warps,
-                    1,
-                    1,
-                    1,
-                    1,
-                    kernel.shared,
-                    0,
-                    kfunction,
-                    None,
-                    None,
-                    kernel,
-                    *args,
-                )
-            else:
-                run(
-                    grid[0],
-                    grid[1],
-                    grid[2],
-                    num_warps,
-                    kernel.shared,
-                    0,
-                    kfunction,
-                    None,
-                    None,
-                    kernel,
-                    *args,
-                )
-        except TypeError:
-            add_cluster_dim = not add_cluster_dim
-            ret_func(grid, num_warps, *args)
-
-    return ret_func
 
 
 def is_multimodal_model(model):
@@ -461,7 +397,7 @@ def kill_parent_process():
     """Kill the parent process and all children of the parent process."""
     current_process = psutil.Process()
     parent_process = current_process.parent()
-    children = current_process.children(recursive=True)
+    children = parent_process.children(recursive=True)
     for child in children:
         if child.pid != current_process.pid:
             os.kill(child.pid, 9)
@@ -537,6 +473,52 @@ def monkey_patch_vllm_dummy_weight_loader():
     setattr(DummyModelLoader, "load_model", load_model)
 
 
+vllm_all_gather_backup = None
+
+
+def monkey_patch_vllm_all_gather(reverse: bool = False):
+    """Monkey patch all-gather to remove in-place operations."""
+    from torch.distributed import _functional_collectives as funcol
+    from vllm.distributed.parallel_state import GroupCoordinator
+
+    global vllm_all_gather_backup
+    if vllm_all_gather_backup is None:
+        vllm_all_gather_backup = GroupCoordinator.all_gather
+
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        assert (
+            -input_.dim() <= dim < input_.dim()
+        ), f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+        input_size = input_.size()
+        # Allocate output tensor.
+        output_tensor = torch.empty(
+            (world_size,) + input_size, dtype=input_.dtype, device=input_.device
+        )
+
+        output_tensor = funcol.all_gather_tensor(
+            input_, gather_dim=0, group=self.device_group
+        ).view((world_size,) + input_size)
+
+        # Reshape
+        output_tensor = output_tensor.movedim(0, dim)
+        output_tensor = output_tensor.reshape(
+            input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
+        )
+        return output_tensor
+
+    if reverse:
+        setattr(GroupCoordinator, "all_gather", vllm_all_gather_backup)
+    else:
+        setattr(GroupCoordinator, "all_gather", all_gather)
+
+
 API_KEY_HEADER_NAME = "X-API-Key"
 
 
@@ -575,7 +557,6 @@ def get_ip_address(ifname):
 
 def send_addrs_to_rank_0(model_port_args, server_args):
     assert server_args.node_rank != 0 and server_args.dp_size == 1
-    import torch.distributed as dist
 
     ifname = os.environ.get(
         "SGLANG_SOCKET_IFNAME", os.environ.get("NCCL_SOCKET_IFNAME", "eth0")
@@ -607,7 +588,6 @@ def send_addrs_to_rank_0(model_port_args, server_args):
 
 def receive_addrs(model_port_args, server_args):
     assert server_args.node_rank == 0 and server_args.dp_size == 1
-    import torch.distributed as dist
 
     ifname = os.environ.get(
         "SGLANG_SOCKET_IFNAME", os.environ.get("NCCL_SOCKET_IFNAME", "eth0")
@@ -640,3 +620,14 @@ def receive_addrs(model_port_args, server_args):
 
     dist.barrier()
     dist.destroy_process_group()
+
+
+def set_ulimit(target_soft_limit=65535):
+    resource_type = resource.RLIMIT_NOFILE
+    current_soft, current_hard = resource.getrlimit(resource_type)
+
+    if current_soft < target_soft_limit:
+        try:
+            resource.setrlimit(resource_type, (target_soft_limit, current_hard))
+        except ValueError as e:
+            logger.warn(f"Fail to set RLIMIT_NOFILE: {e}")

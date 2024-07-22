@@ -105,6 +105,7 @@ class Req:
         # 1: surr_offset
         # 2: read_offset
         # 3: last token
+        self.vid = 0  # version id to sync decode status with in detokenizer_manager
         self.decoded_text = ""
         self.surr_offset = None  # Surrounding offset to defeat the cleanup algorithm
         self.read_offset = None
@@ -558,6 +559,9 @@ class Batch:
                         req.output_ids = cur_output_ids
                         continue
 
+                    # The decode status has diverged from detokenizer_manager
+                    req.vid += 1
+
                     # insert the old request into tree_cache
                     if req_pool_indices_cpu is None:
                         req_pool_indices_cpu = self.req_pool_indices.tolist()
@@ -749,17 +753,20 @@ class Batch:
 
         # TODO(lmzheng): apply penalty
         probs = torch.softmax(logits, dim=-1)
-        try:
-            max_top_k_round, batch_size = 32, probs.shape[0]
-            uniform_samples = torch.rand(
-                (max_top_k_round, batch_size), device=probs.device
+
+        max_top_k_round, batch_size = 32, probs.shape[0]
+        uniform_samples = torch.rand((max_top_k_round, batch_size), device=probs.device)
+        batch_next_token_ids, success = top_k_top_p_sampling_from_probs(
+            probs, uniform_samples, self.top_ks, self.top_ps
+        )
+
+        if torch.any(~success):
+            warnings.warn("Sampling failed, fallback to top_k=1 strategy")
+            probs = probs.masked_fill(torch.isnan(probs), 0.0)
+            argmax_ids = torch.argmax(probs, dim=-1)
+            batch_next_token_ids = torch.where(
+                success, batch_next_token_ids, argmax_ids
             )
-            batch_next_token_ids, _ = top_k_top_p_sampling_from_probs(
-                probs, uniform_samples, self.top_ks, self.top_ps
-            )
-        except RuntimeError as e:
-            warnings.warn(f"Ignore errors in sampling: {e}")
-            batch_next_token_ids = torch.argmax(probs, dim=-1)
 
         if has_regex:
             batch_next_token_ids_cpu = batch_next_token_ids.cpu().numpy()

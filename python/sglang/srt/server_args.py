@@ -33,7 +33,7 @@ class ServerArgs:
 
     # Other runtime options
     tp_size: int = 1
-    stream_interval: int = 8
+    stream_interval: int = 1
     random_seed: Optional[int] = None
 
     # Logging
@@ -55,8 +55,10 @@ class ServerArgs:
     disable_regex_jump_forward: bool = False
     disable_cuda_graph: bool = True
     disable_disk_cache: bool = False
+    enable_torch_compile: bool = False
     attention_reduce_in_fp32: bool = False
     enable_p2p_check: bool = False
+    efficient_weight_load: bool = False
 
     # Distributed args
     nccl_init_addr: Optional[str] = None
@@ -166,6 +168,15 @@ class ServerArgs:
             "--quantization",
             type=str,
             default=ServerArgs.quantization,
+            choices=[
+                "awq",
+                "fp8",
+                "gptq",
+                "marlin",
+                "gptq_marlin",
+                "squeezellm",
+                "bitsandbytes",
+            ],
             help="The quantization method.",
         )
         parser.add_argument(
@@ -243,13 +254,13 @@ class ServerArgs:
         parser.add_argument(
             "--show-time-cost",
             action="store_true",
-            help="Show time cost of custom marks",
+            help="Show time cost of custom marks.",
         )
         parser.add_argument(
             "--api-key",
             type=str,
             default=ServerArgs.api_key,
-            help="Set API key of the server",
+            help="Set API key of the server.",
         )
 
         # Data parallelism
@@ -285,17 +296,17 @@ class ServerArgs:
         parser.add_argument(
             "--disable-flashinfer",
             action="store_true",
-            help="Disable flashinfer inference kernels",
+            help="Disable flashinfer inference kernels.",
         )
         parser.add_argument(
             "--disable-radix-cache",
             action="store_true",
-            help="Disable RadixAttention",
+            help="Disable RadixAttention for prefix caching.",
         )
         parser.add_argument(
             "--disable-regex-jump-forward",
             action="store_true",
-            help="Disable regex jump-forward",
+            help="Disable regex jump-forward.",
         )
         parser.add_argument(
             "--disable-cuda-graph",
@@ -308,6 +319,11 @@ class ServerArgs:
             help="Disable disk cache to avoid possible crashes related to file system or high concurrency.",
         )
         parser.add_argument(
+            "--enable-torch-compile",
+            action="store_true",
+            help="Optimize the model with torch.compile, experimental feature.",
+        )
+        parser.add_argument(
             "--attention-reduce-in-fp32",
             action="store_true",
             help="Cast the intermidiate attention results to fp32 to avoid possible crashes related to fp16."
@@ -317,6 +333,11 @@ class ServerArgs:
             "--enable-p2p-check",
             action="store_true",
             help="Enable P2P check for GPU access, otherwise the p2p access is allowed by default.",
+        )
+        parser.add_argument(
+            "--efficient-weight-load",
+            action="store_true",
+            help="Turn on memory efficient weight loading with quantization (quantize per layer during loading).",
         )
 
     @classmethod
