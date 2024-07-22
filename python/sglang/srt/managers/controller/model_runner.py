@@ -235,11 +235,9 @@ class ModelRunner:
                 "Not enough memory. Please try to increase --mem-fraction-static."
             )
 
+        # decrease the capacity of the memory pool to avoid OOM when loading Mistral-Nemo Model
         self.req_to_token_pool = ReqToTokenPool(
-            max(
-                int(self.max_total_num_tokens / self.model_config.context_len * 512),
-                2048,
-            ),
+            int(self.max_total_num_tokens / self.model_config.context_len * 256),
             self.model_config.context_len + 8,
         )
         self.token_to_kv_pool = TokenToKVPool(
