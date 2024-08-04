@@ -538,7 +538,17 @@ class Runtime:
 
     def shutdown(self):
         if self.pid is not None:
-            kill_child_process(self.pid)
+            try:
+                parent = psutil.Process(self.pid)
+            except psutil.NoSuchProcess:
+                return
+            children = parent.children(recursive=True)
+            for child in children:
+                child.kill()
+            psutil.wait_procs(children, timeout=5)
+            # FIXME Why are we killing parent?
+            # parent.kill()
+            # parent.wait(timeout=5)
             self.pid = None
 
     def cache_prefix(self, prefix: str):
