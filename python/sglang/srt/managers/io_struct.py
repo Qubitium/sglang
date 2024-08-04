@@ -1,4 +1,19 @@
 """
+Copyright 2023-2024 SGLang Team
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
+"""
 The definition of objects transfered between different
 processes (TokenizerManager, DetokenizerManager, Controller).
 """
@@ -7,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
-from sglang.srt.managers.controller.infer_batch import BaseFinishReason
+from sglang.srt.managers.schedule_batch import BaseFinishReason
 from sglang.srt.sampling_params import SamplingParams
 
 
@@ -20,7 +35,7 @@ class GenerateReqInput:
     # The image input. It can be a file name, a url, or base64 encoded string.
     # See also python/sglang/srt/utils.py:load_image.
     image_data: Optional[Union[List[str], str]] = None
-    # The sampling_params.
+    # The sampling_params. See descriptions below.
     sampling_params: Union[List[Dict], Dict] = None
     # The request id.
     rid: Optional[Union[List[str], str]] = None
@@ -30,7 +45,7 @@ class GenerateReqInput:
     logprob_start_len: Optional[Union[List[int], int]] = None
     # The number of top logprobs to return.
     top_logprobs_num: Optional[Union[List[int], int]] = None
-    # Whether to detokenize tokens in logprobs.
+    # Whether to detokenize tokens in text in the returned logprobs.
     return_text_in_logprobs: bool = False
     # Whether to stream output.
     stream: bool = False
@@ -40,7 +55,10 @@ class GenerateReqInput:
             self.text is not None and self.input_ids is not None
         ):
             raise ValueError("Either text or input_ids should be provided.")
-        if self.sampling_params.get("n", 1) != 1:
+        if (
+            isinstance(self.sampling_params, dict)
+            and self.sampling_params.get("n", 1) != 1
+        ):
             is_single = False
         else:
             if self.text is not None:
@@ -61,8 +79,26 @@ class GenerateReqInput:
             if self.top_logprobs_num is None:
                 self.top_logprobs_num = 0
         else:
-
-            parallel_sample_num = self.sampling_params.get("n", 1)
+            parallel_sample_num_list = []
+            if isinstance(self.sampling_params, dict):
+                parallel_sample_num = self.sampling_params.get("n", 1)
+            elif isinstance(self.sampling_params, list):
+                for sp in self.sampling_params:
+                    parallel_sample_num = sp.get("n", 1)
+                    parallel_sample_num_list.append(parallel_sample_num)
+                parallel_sample_num = max(parallel_sample_num_list)
+                all_equal = all(
+                    element == parallel_sample_num
+                    for element in parallel_sample_num_list
+                )
+                if parallel_sample_num > 1 and (not all_equal):
+                    ## TODO cope with the case that the parallel_sample_num is different for different samples
+                    raise ValueError(
+                        "The parallel_sample_num should be the same for all samples in sample params."
+                    )
+            else:
+                parallel_sample_num = 1
+            self.parallel_sample_num = parallel_sample_num
 
             if parallel_sample_num != 1:
                 # parallel sampling +1 represents the original prefill stage

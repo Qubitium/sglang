@@ -76,7 +76,7 @@ def gen(
     choices: Optional[List[str]] = None,
     regex: Optional[str] = None,
 ):
-    """Call the model to generate. See the meaning of the arguments in docs/sampling_params.md"""
+    """Call the model to generate. See the meaning of the arguments in docs/en/sampling_params.md"""
 
     if choices:
         return SglSelect(name, choices, 0.0 if temperature is None else temperature)
@@ -214,6 +214,14 @@ def user(expr: Optional[SglExpr] = None):
 
 def assistant(expr: Optional[SglExpr] = None):
     return _role_common("assistant", expr)
+
+
+def system_begin():
+    return SglRoleBegin("system")
+
+
+def system_end():
+    return SglRoleEnd("system")
 
 
 def user_begin():

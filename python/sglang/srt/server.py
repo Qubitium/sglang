@@ -1,4 +1,19 @@
 """
+Copyright 2023-2024 SGLang Team
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
+"""
 The entry point of inference server.
 SRT = SGLang Runtime.
 """
@@ -13,7 +28,7 @@ import sys
 import threading
 import time
 from http import HTTPStatus
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Union
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -24,17 +39,17 @@ import psutil
 import requests
 import uvicorn
 import uvloop
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
 from sglang.srt.constrained import disable_cache
 from sglang.srt.hf_transformers_utils import get_tokenizer
-from sglang.srt.managers.controller.manager_multi import (
+from sglang.srt.managers.controller_multi import (
     start_controller_process as start_controller_process_multi,
 )
-from sglang.srt.managers.controller.manager_single import launch_tp_servers
-from sglang.srt.managers.controller.manager_single import (
+from sglang.srt.managers.controller_single import launch_tp_servers
+from sglang.srt.managers.controller_single import (
     start_controller_process as start_controller_process_single,
 )
 from sglang.srt.managers.detokenizer_manager import start_detokenizer_process
@@ -42,8 +57,13 @@ from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api.adapter import (
     load_chat_template_for_openai_api,
+    v1_batches,
     v1_chat_completions,
     v1_completions,
+    v1_files_create,
+    v1_retrieve_batch,
+    v1_retrieve_file,
+    v1_retrieve_file_content,
 )
 from sglang.srt.openai_api.protocol import ModelCard, ModelList
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -53,6 +73,8 @@ from sglang.srt.utils import (
     allocate_init_ports,
     assert_pkg_version,
     enable_show_time_cost,
+    kill_child_process,
+    maybe_set_triton_cache_manager,
     set_ulimit,
 )
 from sglang.utils import get_exception_traceback
@@ -158,22 +180,43 @@ async def openai_v1_chat_completions(raw_request: Request):
     return await v1_chat_completions(tokenizer_manager, raw_request)
 
 
+@app.post("/v1/files")
+async def openai_v1_files(file: UploadFile = File(...), purpose: str = Form("batch")):
+    return await v1_files_create(
+        file, purpose, tokenizer_manager.server_args.file_storage_pth
+    )
+
+
+@app.post("/v1/batches")
+async def openai_v1_batches(raw_request: Request):
+    return await v1_batches(tokenizer_manager, raw_request)
+
+
+@app.get("/v1/batches/{batch_id}")
+async def retrieve_batch(batch_id: str):
+    return await v1_retrieve_batch(batch_id)
+
+
+@app.get("/v1/files/{file_id}")
+async def retrieve_file(file_id: str):
+    # https://platform.openai.com/docs/api-reference/files/retrieve
+    return await v1_retrieve_file(file_id)
+
+
+@app.get("/v1/files/{file_id}/content")
+async def retrieve_file_content(file_id: str):
+    # https://platform.openai.com/docs/api-reference/files/retrieve-contents
+    return await v1_retrieve_file_content(file_id)
+
+
 @app.get("/v1/models")
 def available_models():
     """Show available models."""
-    model_names = [tokenizer_manager.model_path]
+    served_model_names = [tokenizer_manager.served_model_name]
     model_cards = []
-    for model_name in model_names:
-        model_cards.append(ModelCard(id=model_name, root=model_name))
+    for served_model_name in served_model_names:
+        model_cards.append(ModelCard(id=served_model_name, root=served_model_name))
     return ModelList(data=model_cards)
-
-
-def _set_global_server_args(server_args: ServerArgs):
-    global global_server_args_dict
-    global_server_args_dict = {
-        "disable_flashinfer": server_args.disable_flashinfer,
-        "attention_reduce_in_fp32": server_args.attention_reduce_in_fp32,
-    }
 
 
 def _set_torch_compile_config():
@@ -189,12 +232,47 @@ def _set_torch_compile_config():
     torch._dynamo.config.accumulated_cache_size_limit = 256
 
 
+def set_envs_and_config(server_args: ServerArgs):
+    # Set global environments
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    os.environ["NCCL_CUMEM_ENABLE"] = "0"
+    os.environ["NCCL_NVLS_ENABLE"] = "0"
+    os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+
+    # Set ulimit
+    set_ulimit()
+
+    # Enable show time cost for debugging
+    if server_args.show_time_cost:
+        enable_show_time_cost()
+
+    # Disable disk cache
+    if server_args.disable_disk_cache:
+        disable_cache()
+
+    # Fix triton bugs
+    if server_args.tp_size * server_args.dp_size > 1:
+        # FIXME: remove this after https://github.com/triton-lang/triton/pull/4295 is used as a dependency.
+        maybe_set_triton_cache_manager()
+
+    # Set torch compile config
+    if server_args.enable_torch_compile:
+        _set_torch_compile_config()
+
+    # Set global chat template
+    if server_args.chat_template:
+        # TODO: replace this with huggingface transformers template
+        load_chat_template_for_openai_api(server_args.chat_template)
+
+
 def launch_server(
     server_args: ServerArgs,
     tokenizer_init_chan=None,
     model_overide_args: Optional[dict] = None,
     pipe_finish_writer: Optional[mp.connection.Connection] = None,
 ):
+    server_args.check_server_args()
+
     """Launch an HTTP server."""
     print("launch_server started.... ")
 
@@ -205,31 +283,16 @@ def launch_server(
         format="%(message)s",
     )
 
-    # Set global environments
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-    os.environ["NCCL_CUMEM_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
-    set_ulimit()
-    if server_args.show_time_cost:
-        enable_show_time_cost()
-    if server_args.disable_disk_cache:
-        disable_cache()
     if not server_args.disable_flashinfer:
         assert_pkg_version(
             "flashinfer",
-            "0.1.1",
+            "0.1.3",
             "Please uninstall the old version and "
             "reinstall the latest version by following the instructions "
             "at https://docs.flashinfer.ai/installation.html.",
         )
-    if server_args.chat_template:
-        # TODO: replace this with huggingface transformers template
-        load_chat_template_for_openai_api(server_args.chat_template)
 
-    if server_args.enable_torch_compile:
-        _set_torch_compile_config()
-
-    _set_global_server_args(server_args)
+    set_envs_and_config(server_args)
 
     # Allocate ports
     server_args.port, server_args.additional_ports = allocate_init_ports(
@@ -249,11 +312,10 @@ def launch_server(
     idle_chan = mp.Queue()
     startup_chan = mp.Queue()
 
+    logger.info(f"{server_args=}")
 
     # Handle multi-node tensor parallelism
     if server_args.nnodes > 1:
-        assert server_args.dp_size == 1, "Multi-node dp is not supported."
-
         if server_args.node_rank != 0:
             tp_size_local = server_args.tp_size // server_args.nnodes
             gpu_ids = [
@@ -476,18 +538,11 @@ class Runtime:
 
     def shutdown(self):
         if self.pid is not None:
-            try:
-                parent = psutil.Process(self.pid)
-            except psutil.NoSuchProcess:
-                return
-            children = parent.children(recursive=True)
-            for child in children:
-                child.kill()
-            psutil.wait_procs(children, timeout=5)
-            # FIXME Why are we killing parent?
-            # parent.kill()
-            # parent.wait(timeout=5)
+            kill_child_process(self.pid)
             self.pid = None
+
+    def cache_prefix(self, prefix: str):
+        self.endpoint.cache_prefix(prefix)
 
     # def get_tokenizer(self):
     #     return get_tokenizer(
@@ -496,11 +551,11 @@ class Runtime:
     #         trust_remote_code=self.server_args.trust_remote_code,
     #     )
 
-    async def add_request(
-            self,
-            prompt: str,
-            sampling_params: Dict,
-    ) -> None:
+    async def async_generate(
+        self,
+        prompt: str,
+        sampling_params: Optional[Dict] = None,
+    ):
         json_data = {
             "text": prompt,
             "sampling_params": sampling_params,
@@ -521,6 +576,27 @@ class Runtime:
                         if cur:
                             yield cur
                         pos += len(cur)
+
+    add_request = async_generate
+
+    def generate(
+        self,
+        prompt: str,
+        sampling_params: Optional[Dict] = None,
+        return_logprob: Optional[Union[List[bool], bool]] = False,
+        top_logprobs_num: Optional[Union[List[int], int]] = None,
+    ):
+        json_data = {
+            "text": prompt,
+            "sampling_params": sampling_params,
+            "return_logprob": return_logprob,
+            "top_logprobs_num": top_logprobs_num,
+        }
+        response = requests.post(
+            self.url + "/generate",
+            json=json_data,
+        )
+        return json.dumps(response.json())
 
     def __del__(self):
         self.shutdown()

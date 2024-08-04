@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sglang"
-version = "999.1.22+dev20240722073037"
+version = "999.2.9post1+dev20240804080637"
 description = "SGLang is yet another fast serving framework for large language models and vision language models."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -15,7 +15,7 @@ dependencies = [ "requests", "tqdm",]
 file = "LICENSE"
 
 [project.optional-dependencies]
-srt = [ "aiohttp", "fastapi", "hf_transfer", "huggingface_hub", "interegular", "packaging", "pillow", "psutil", "pydantic", "torch", "uvicorn", "uvloop", "zmq", "vllm==0.5.1", "outlines>=0.0.44",]
+srt = [ "aiohttp", "fastapi", "hf_transfer", "huggingface_hub", "interegular", "packaging", "pillow", "psutil", "pydantic", "torch", "uvicorn", "uvloop", "zmq", "vllm==0.5.3.post1", "outlines>=0.0.44", "python-multipart",]
 openai = [ "openai>=1.0", "tiktoken",]
 anthropic = [ "anthropic>=0.20.0",]
 litellm = [ "litellm>=1.0.0",]

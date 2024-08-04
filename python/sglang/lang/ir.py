@@ -101,7 +101,6 @@ class SglSamplingParams:
             "stop": self.stop or None,
             "temperature": self.temperature,
             "top_p": self.top_p,
-            "top_k": self.top_k,
             "frequency_penalty": self.frequency_penalty,
             "presence_penalty": self.presence_penalty,
         }
@@ -418,7 +417,7 @@ class SglGen(SglExpr):
         dtype: Optional[type] = None,
         regex: Optional[str] = None,
     ):
-        """Call the model to generate. See the meaning of the arguments in docs/sampling_params.md"""
+        """Call the model to generate. See the meaning of the arguments in docs/en/sampling_params.md"""
         super().__init__()
         self.name = name
         self.sampling_params = SglSamplingParams(

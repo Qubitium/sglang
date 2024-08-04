@@ -541,18 +541,20 @@ class StreamExecutor:
         (
             decision,
             normalized_prompt_logprobs,
-            prefill_token_logprobs,
-            decode_token_logprobs,
+            input_token_logprobs,
+            output_token_logprobs,
         ) = self.backend.select(self, expr.choices, expr.temperature)
         if expr.name is not None:
             name = expr.name
             self.variables[name] = decision
             self.meta_info[name] = {
                 "normalized_prompt_logprobs": normalized_prompt_logprobs,
-                "prefill_token_logprobs": prefill_token_logprobs,
-                "decode_token_logprobs": decode_token_logprobs,
+                "input_token_logprobs": input_token_logprobs,
+                "output_token_logprobs": output_token_logprobs,
             }
             self.variable_event[name].set()
+            if self.stream_var_event:
+                self.stream_var_event[name].set()
         self.text_ += decision
 
     def _execute_variable(self, expr: SglVariable):
@@ -706,9 +708,9 @@ class ProgramState:
 
     def _role_common(self, name: str, expr: Optional[SglExpr] = None):
         if expr is not None:
-            self.stream_executor.submit(
-                SglExprList([SglRoleBegin(name), expr, SglRoleEnd(name)])
-            )
+            role_expr = SglExprList([SglRoleBegin(name), expr, SglRoleEnd(name)])
+            self.stream_executor.submit(role_expr)
+            return role_expr
         else:
 
             @contextmanager
@@ -779,7 +781,14 @@ class ProgramState:
                     if self.stream_executor.is_finished:
                         break
             else:
-                event = self.stream_executor.stream_var_event[var_name]
+                event = None
+                while not event:
+                    if var_name in self.stream_executor.stream_var_event:
+                        event = self.stream_executor.stream_var_event[var_name]
+                    if self.stream_executor.is_finished:
+                        yield ""
+                        return
+
                 while True:
                     event.wait()
                     event.clear()
@@ -814,7 +823,14 @@ class ProgramState:
                     if self.stream_executor.is_finished:
                         break
             else:
-                event = self.stream_executor.stream_var_event[var_name]
+                event = None
+                while not event:
+                    if var_name in self.stream_executor.stream_var_event:
+                        event = self.stream_executor.stream_var_event[var_name]
+                    if self.stream_executor.is_finished:
+                        yield ""
+                        return
+
                 while True:
                     await loop.run_in_executor(None, event.wait)
                     event.clear()
