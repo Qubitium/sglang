@@ -480,7 +480,6 @@ def import_model_classes():
 
 
 def _try_load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
-    print("sglang load_model_cls_srt", model_arch)
     model_arch_name_to_cls = import_model_classes()
     if model_arch not in model_arch_name_to_cls:
         raise ValueError(
