@@ -479,7 +479,8 @@ def import_model_classes():
     return model_arch_name_to_cls
 
 
-def load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
+def _try_load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
+    print("sglang load_model_cls_srt", model_arch)
     model_arch_name_to_cls = import_model_classes()
     if model_arch not in model_arch_name_to_cls:
         raise ValueError(
@@ -490,4 +491,4 @@ def load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
 
 
 # Monkey patch model loader
-setattr(ModelRegistry, "load_model_cls", load_model_cls_srt)
+setattr(ModelRegistry, "_try_load_model_cls", _try_load_model_cls_srt)
