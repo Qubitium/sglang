@@ -41,19 +41,24 @@ pip install --upgrade pip
 pip install "sglang[all]"
 
 # Install FlashInfer CUDA kernels
-pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3/
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
 ```
 
 ### Method 2: From source
 ```
+<<<<<<< HEAD
 git clone https://github.com/sgl-project/sglang.git
+=======
+# Use the last release branch
+git clone -b v0.2.11 https://github.com/sgl-project/sglang.git
+>>>>>>> main
 cd sglang
 
 pip install --upgrade pip
 pip install -e "python[all]"
 
 # Install FlashInfer CUDA kernels
-pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3/
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
 ```
 
 ### Method 3: Using docker
@@ -131,7 +136,7 @@ response = client.chat.completions.create(
 print(response)
 ```
 
-It supports streaming, vision, and most features of the Chat/Completions/Models endpoints specified by the [OpenAI API Reference](https://platform.openai.com/docs/api-reference/).
+It supports streaming, vision, and most features of the Chat/Completions/Models/Batch endpoints specified by the [OpenAI API Reference](https://platform.openai.com/docs/api-reference/).
 
 ### Additional Server Arguments
 - Add `--tp 2` to enable tensor parallelism. If it indicates `peer access is not supported between these two devices`, add `--enable-p2p-check` option.
@@ -142,11 +147,19 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 ```
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000 --dp 2 --tp 2
 ```
-- If you see out-of-memory errors during serving, please try to reduce the memory usage of the KV cache pool by setting a smaller value of `--mem-fraction-static`. The default value is `0.9`
+- If you see out-of-memory errors during serving, please try to reduce the memory usage of the KV cache pool by setting a smaller value of `--mem-fraction-static`. The default value is `0.9`.
 ```
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000 --mem-fraction-static 0.7
 ```
+<<<<<<< HEAD
 - See [hyperparameter_tuning.md](docs/hyperparameter_tuning.md) on tuning hyperparameters for better performance.
+=======
+- If you see out-of-memory errors during prefill for long prompts on a model that supports long context, consider using chunked prefill.
+```
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-8B-Instruct --port 30000 --chunked-prefill-size 8192
+```
+- See [hyperparameter_tuning.md](docs/en/hyperparameter_tuning.md) on tuning hyperparameters for better performance.
+>>>>>>> main
 - Add `--nnodes 2` to run tensor parallelism on multiple nodes. If you have two nodes with two GPUs on each node and want to run TP=4, let `sgl-dev-0` be the hostname of the first node and `50000` be an available port.
 ```
 # Node 0
@@ -157,7 +170,22 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 ```
 - If the model does not have a template in the Hugging Face tokenizer, you can specify a [custom chat template](docs/custom_chat_template.md).
 - To enable fp8 quantization, you can add `--quantization fp8` on a fp16 checkpoint or directly load a fp8 checkpoint without specifying any arguments.
+<<<<<<< HEAD
 
+=======
+- To enable experimental torch.compile support, you can add `--enable-torch-compile`. It accelerates small models on small batch sizes.
+
+### Use Models From ModelScope
+To use model from [ModelScope](https://www.modelscope.cn), setting environment variable SGLANG_USE_MODELSCOPE.
+```
+export SGLANG_USE_MODELSCOPE=true
+```
+Launch [Qwen2-7B-Instruct](https://www.modelscope.cn/models/qwen/qwen2-7b-instruct) Server
+```
+SGLANG_USE_MODELSCOPE=true python -m sglang.launch_server --model-path qwen/Qwen2-7B-Instruct --port 30000
+```    
+  
+>>>>>>> main
 ### Supported Models
 
 - Llama / Llama 2 / Llama 3
@@ -181,6 +209,22 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 - Mistral NeMo
 
 Instructions for supporting a new model are [here](https://github.com/sgl-project/sglang/blob/main/docs/model_support.md).
+
+### Run Llama 3.1 405B
+
+```bash
+## Run 405B (fp8) on a single node
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-405B-Instruct-FP8 --tp 8
+
+## Run 405B (fp16) on two nodes
+# replace the `172.16.4.52:20000` with your own first node ip address and port, disable CUDA Graph temporarily
+
+# on the first node
+GLOO_SOCKET_IFNAME=eth0 python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-405B-Instruct --tp 16 --nccl-init-addr 172.16.4.52:20000 --nnodes 2 --node-rank 0 --disable-cuda-graph --mem-frac 0.75
+
+# on the second
+GLOO_SOCKET_IFNAME=eth0 python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-405B-Instruct --tp 16 --nccl-init-addr 172.16.4.52:20000 --nnodes 2 --node-rank 1 --disable-cuda-graph --mem-frac 0.75
+```
 
 ### Benchmark Performance
 

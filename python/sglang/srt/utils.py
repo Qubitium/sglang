@@ -206,6 +206,8 @@ def allocate_init_ports(
 def get_int_token_logit_bias(tokenizer, vocab_size):
     """Get the logit bias for integer-only tokens."""
     # a bug when model's vocab size > tokenizer.vocab_size
+    if tokenizer == None:
+        return [-1e5] * vocab_size
     vocab_size = tokenizer.vocab_size
     logit_bias = np.zeros(vocab_size, dtype=np.float32)
     for t_id in range(vocab_size):
@@ -230,6 +232,15 @@ def is_multimodal_model(model):
         )
 
     raise ValueError("unrecognized type")
+
+
+def is_generation_model(model_architectures):
+    if (
+        "LlamaEmbeddingModel" in model_architectures
+        or "MistralModel" in model_architectures
+    ):
+        return False
+    return True
 
 
 def decode_video_base64(video_base64):
@@ -601,26 +612,6 @@ class CustomCacheManager(FileCacheManager):
                 raise RuntimeError("Could not create or locate cache dir")
 
 
-API_KEY_HEADER_NAME = "X-API-Key"
-
-
-class APIKeyValidatorMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, api_key: str):
-        super().__init__(app)
-        self.api_key = api_key
-
-    async def dispatch(self, request, call_next):
-        # extract API key from the request headers
-        api_key_header = request.headers.get(API_KEY_HEADER_NAME)
-        if not api_key_header or api_key_header != self.api_key:
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Invalid API Key"},
-            )
-        response = await call_next(request)
-        return response
-
-
 def get_ip_address(ifname):
     """
     Get the IP address of a network interface.
@@ -762,3 +753,35 @@ def monkey_patch_vllm_qvk_linear_loader():
         origin_weight_loader(self, param, loaded_weight, loaded_shard_id)
 
     setattr(QKVParallelLinear, "weight_loader", weight_loader_srt)
+
+
+def add_api_key_middleware(app, api_key):
+    @app.middleware("http")
+    async def authentication(request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if request.url.path.startswith("/health"):
+            return await call_next(request)
+        if request.headers.get("Authorization") != "Bearer " + api_key:
+            return JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
+def prepare_model(model_path):
+    if "SGLANG_USE_MODELSCOPE" in os.environ:
+        if not os.path.exists(model_path):
+            from modelscope import snapshot_download
+
+            return snapshot_download(model_path)
+    return model_path
+
+
+def prepare_tokenizer(tokenizer_path):
+    if "SGLANG_USE_MODELSCOPE" in os.environ:
+        if not os.path.exists(tokenizer_path):
+            from modelscope import snapshot_download
+
+            return snapshot_download(
+                tokenizer_path, ignore_patterns=["*.bin", "*.safetensors"]
+            )
+    return tokenizer_path
