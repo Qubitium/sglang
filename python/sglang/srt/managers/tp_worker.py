@@ -441,7 +441,7 @@ class ModelTpServer:
     def forward_prefill_batch(self, batch: ScheduleBatch):
         # Build batch tensors
         batch.prepare_for_extend(
-            self.model_config.vocab_size, self.int_token_logit_bias, self.model_runner.torch_dtype
+            self.model_config.vocab_size, self.int_token_logit_bias
         )
 
         if self.model_runner.is_generation:

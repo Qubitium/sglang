@@ -90,21 +90,6 @@ class FINISH_ABORT(BaseFinishReason):
     def __str__(self) -> str:
         return "FINISH_ABORT"
 
-
-# Referring to RepetitionPenaltyLogitsProcessor.
-# see https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py#L338
-def apply_repetition_penalty(penalty: torch.Tensor, input_ids: List[int],
-                             scores: torch.Tensor, dim: int = 1) -> torch.Tensor:
-    input_ids = torch.tensor(input_ids, device=scores.device)
-    score = torch.gather(scores, dim, input_ids)
-
-    # if score < 0 then repetition penalty has to be multiplied to reduce the token probabilities
-    score = torch.where(score < 0, score * penalty, score / penalty)
-
-    scores.scatter_(dim, input_ids, score)
-    return scores
-
-
 class Req:
     """Store all inforamtion of a request."""
 
@@ -445,7 +430,7 @@ class ScheduleBatch:
                     )
                 self.logit_bias[i][: len(int_token_logit_bias)] = int_token_logit_bias
 
-    def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor, logits_dtype):
+    def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor):
         bs = self.batch_size()
         reqs = self.reqs
         input_ids = [r.input_ids[len(r.prefix_indices) :] for r in reqs]
