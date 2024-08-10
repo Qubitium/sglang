@@ -671,7 +671,9 @@ class ModelTpServer:
 
                     meta_info = {
                         "prompt_tokens": len(req.origin_input_ids),
+                        "prompt_tokens_ids": req.origin_input_ids,
                         "completion_tokens": len(req.output_ids),
+                        "completion_tokens_ids": req.output_ids,
                         "completion_tokens_wo_jump_forward": req.completion_tokens_wo_jump_forward,
                         "finish_reason": str(req.finished_reason),
                     }

@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class DecodeStatus:
+    vid: int
     decoded_text: str
     decode_ids: List[int]
     surr_offset: int
@@ -640,7 +641,7 @@ class TokenizerManager:
             )
         else:
             assert isinstance(recv_obj_detokenizer, BatchTokenIDOut)
-            # print(f"detokenizer detokenizer_chan get done: {recv_token_out}")
+            # print(f"detokenizer detokenizer_chan get done: {recv_obj_detokenizer}")
 
             # The following code is from handle_loop() in detokenizer_manager.py
             bs = len(recv_obj_detokenizer.rids)
@@ -713,7 +714,7 @@ class TokenizerManager:
                             if pos != -1:
                                 output_strs[i] = output_strs[i][:pos]
 
-                    # print(f"detokenizer tokenizer_chan put",recv_token_out.rids)
+                    # print(f"detokenizer tokenizer_chan put",recv_obj_detokenizer.rids)
                     return BatchStrOut(
                         rids=recv_obj_detokenizer.rids,
                         output_strs=output_strs,
