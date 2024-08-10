@@ -47,6 +47,7 @@ class InputMetadata:
     batch_size: int
     req_pool_indices: torch.Tensor
     seq_lens: torch.Tensor
+    prefix_lens: torch.Tensor
     req_to_token_pool: ReqToTokenPool
     token_to_kv_pool: BaseTokenToKVPool
 
@@ -162,6 +163,12 @@ class InputMetadata:
         batch: ScheduleBatch,
         forward_mode: ForwardMode,
     ):
+        prefix_lens = None
+        if forward_mode != ForwardMode.DECODE:
+            prefix_lens = torch.tensor(
+                [len(r.prefix_indices) for r in batch.reqs], device="cuda"
+            )
+
         ret = cls(
             forward_mode=forward_mode,
             batch_size=batch.batch_size(),
@@ -173,6 +180,7 @@ class InputMetadata:
             return_logprob=batch.return_logprob,
             top_logprobs_nums=batch.top_logprobs_nums,
             logits_processors=batch.custom_logits_processors(),
+            prefix_lens=prefix_lens,
         )
 
         ret.compute_positions(batch)
@@ -183,12 +191,6 @@ class InputMetadata:
 
         if forward_mode != ForwardMode.DECODE:
             ret.init_multimuldal_info(batch)
-
-        prefix_lens = None
-        if forward_mode != ForwardMode.DECODE:
-            prefix_lens = torch.tensor(
-                [len(r.prefix_indices) for r in batch.reqs], device="cuda"
-            )
 
         if model_runner.server_args.disable_flashinfer:
             ret.init_triton_args(batch, prefix_lens)

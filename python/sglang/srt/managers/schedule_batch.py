@@ -319,7 +319,6 @@ class ScheduleBatch:
     input_ids: torch.Tensor = None
     req_pool_indices: torch.Tensor = None
     seq_lens: torch.Tensor = None
-    prefix_lens: torch.Tensor = None
     position_ids_offsets: torch.Tensor = None
     out_cache_loc: torch.Tensor = None
     extend_num_tokens: int = None
@@ -435,7 +434,6 @@ class ScheduleBatch:
         reqs = self.reqs
         input_ids = [r.input_ids[len(r.prefix_indices) :] for r in reqs]
         extend_num_tokens = sum(len(ids) for ids in input_ids)
-        prefix_lens = []
         seq_lens = []
 
         # Allocate memory
@@ -448,7 +446,6 @@ class ScheduleBatch:
             pre_len, seq_len = len(req.prefix_indices), len(req.input_ids)
             ext_len = seq_len - pre_len
             seq_lens.append(seq_len)
-            prefix_lens.append(pre_len)
 
             if pre_len > 0:
                 self.req_to_token_pool.req_to_token[req.req_pool_idx][
@@ -465,7 +462,6 @@ class ScheduleBatch:
             self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int32)
             self.req_pool_indices = torch.tensor(req_pool_indices_cpu)
             self.seq_lens = torch.tensor(seq_lens, dtype=torch.int32)
-            self.prefix_lens = torch.tensor(prefix_lens, dtype=torch.int32)
             self.position_ids_offsets = torch.zeros((bs,), dtype=torch.int64)
 
         self.extend_num_tokens = extend_num_tokens
