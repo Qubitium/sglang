@@ -15,16 +15,25 @@ limitations under the License.
 
 """Request policy scheduler"""
 
+import os
 import random
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import List
+from typing import Dict, List, Optional
 
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
+from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
+from sglang.srt.mem_cache.radix_cache import TreeNode
+
+# Clip the estimation of max_new_tokens for the request whose max_new_tokens is very large.
+# This can prevent the server from being too conservative.
+# Note that this only clips the estimation in the scheduler but does not change the stop
+# condition. The request can still generate tokens until it hits the unclipped max_new_tokens.
+CLIP_MAX_NEW_TOKENS = int(os.environ.get("SGLANG_CLIP_MAX_NEW_TOKENS", "4096"))
 
 
 class PolicyScheduler:
-    def __init__(self, policy, tree_cache):
+    def __init__(self, policy: str, tree_cache: BasePrefixCache):
         if tree_cache.disable and policy in ["lpm", "dfs-weight"]:
             # LPM and DFS-weight is meaningless when the tree cache is disabled.
             policy = "fcfs"
@@ -33,13 +42,15 @@ class PolicyScheduler:
         self.tree_cache = tree_cache
 
     def calc_priority(self, waiting_queue: List[Req]):
+        # Compute matched prefix length
+        prefix_computed = False
         if self.policy in ["lpm", "dfs-weight"]:
-            # Compute matched prefix length
             for r in waiting_queue:
                 # NOTE: the prefix_indices must always be aligned with last_node
                 r.prefix_indices, r.last_node = self.tree_cache.match_prefix(
                     rid=r.rid, key=r.adjust_max_prefix_ids()
                 )
+            prefix_computed = True
 
         if self.policy == "lpm":
             # Longest Prefix Match
@@ -72,12 +83,20 @@ class PolicyScheduler:
         else:
             raise ValueError(f"Unknown schedule_policy: {self.policy}")
 
-    def calc_weight(self, cur_node, node_to_weight):
+        return prefix_computed
+
+    def calc_weight(self, cur_node: TreeNode, node_to_weight: Dict):
         for child in cur_node.children.values():
             self.calc_weight(child, node_to_weight)
             node_to_weight[cur_node] += node_to_weight[child]
 
-    def get_dfs_priority(self, cur_node, node_to_priority, last_node_to_reqs, q):
+    def get_dfs_priority(
+        self,
+        cur_node: TreeNode,
+        node_to_priority: Dict,
+        last_node_to_reqs: Dict,
+        q: List,
+    ):
         childs = [child for child in cur_node.children.values()]
         childs.sort(key=lambda x: -node_to_priority[x])
         for child in childs:
@@ -88,10 +107,10 @@ class PolicyScheduler:
 class PrefillAdder:
     def __init__(
         self,
-        tree_cache,
-        rem_total_tokens,
-        rem_input_tokens,
-        rem_chunk_tokens,
+        tree_cache: BasePrefixCache,
+        rem_total_tokens: int,
+        rem_input_tokens: int,
+        rem_chunk_tokens: Optional[int],
     ):
         self.tree_cache = tree_cache
         self.rem_total_tokens = rem_total_tokens
@@ -119,7 +138,11 @@ class PrefillAdder:
     ):
         self.rem_total_tokens -= sum(
             [
-                (r.sampling_params.max_new_tokens - len(r.output_ids)) * new_token_ratio
+                min(
+                    (r.sampling_params.max_new_tokens - len(r.output_ids)),
+                    CLIP_MAX_NEW_TOKENS,
+                )
+                * new_token_ratio
                 for r in running_batch.reqs
             ]
         )
@@ -138,20 +161,24 @@ class PrefillAdder:
     def add_inflight_req(self, req: Req):
         truncated = req.extend_input_len > self.rem_chunk_tokens
         req.extend_input_len = min(req.extend_input_len, self.rem_chunk_tokens)
-        req.input_ids = req.input_ids[: len(req.prefix_indices) + req.extend_input_len]
+        req.fill_ids = req.fill_ids[: len(req.prefix_indices) + req.extend_input_len]
         self.can_run_list.append(req)
 
         self._prefill_one_req(
             len(req.prefix_indices),
             req.extend_input_len,
-            req.sampling_params.max_new_tokens if not truncated else 0,
+            (
+                min(req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS)
+                if not truncated
+                else 0
+            ),
         )
 
         # Return if chunked prefill not finished
         return req if truncated else None
 
     @contextmanager
-    def _lock_node(self, last_node):
+    def _lock_node(self, last_node: TreeNode):
         try:
             delta = self.tree_cache.inc_lock_ref(last_node)
             self.rem_total_tokens += delta
@@ -161,7 +188,9 @@ class PrefillAdder:
             self.rem_total_tokens += delta
 
     def add_one_req(self, req: Req):
-        total_tokens = req.extend_input_len + req.sampling_params.max_new_tokens
+        total_tokens = req.extend_input_len + min(
+            req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS
+        )
         input_tokens = req.extend_input_len
         prefix_len = len(req.prefix_indices)
 
@@ -184,7 +213,9 @@ class PrefillAdder:
                 self.can_run_list.append(req)
                 self.tree_cache.inc_lock_ref(req.last_node)
                 self._prefill_one_req(
-                    prefix_len, input_tokens, req.sampling_params.max_new_tokens
+                    prefix_len,
+                    input_tokens,
+                    min(req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS),
                 )
             else:
                 # Chunked prefill
@@ -193,7 +224,7 @@ class PrefillAdder:
                     return False
 
                 req.extend_input_len = trunc_len
-                req.input_ids = req.input_ids[: len(req.prefix_indices) + trunc_len]
+                req.fill_ids = req.fill_ids[: len(req.prefix_indices) + trunc_len]
                 self.can_run_list.append(req)
                 self.new_inflight_req = req
                 self.tree_cache.inc_lock_ref(req.last_node)

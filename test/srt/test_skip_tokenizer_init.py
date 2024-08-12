@@ -1,23 +1,22 @@
 import json
-import os
-import sys
 import unittest
 
 import requests
 
 from sglang.srt.utils import kill_child_process
-from sglang.test.run_eval import run_eval
-from sglang.test.test_utils import DEFAULT_MODEL_NAME_FOR_TEST, popen_launch_server
+from sglang.test.test_utils import (
+    DEFAULT_MODEL_NAME_FOR_TEST,
+    DEFAULT_URL_FOR_TEST,
+    popen_launch_server,
+)
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-
-class TestSRTEndpoint(unittest.TestCase):
+class TestSkipTokenizerInit(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MODEL_NAME_FOR_TEST
-        cls.base_url = "http://127.0.0.1:8157"
+        cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
             cls.model, cls.base_url, timeout=300, other_args=["--skip-tokenizer-init"]
         )
@@ -26,9 +25,7 @@ class TestSRTEndpoint(unittest.TestCase):
     def tearDownClass(cls):
         kill_child_process(cls.process.pid)
 
-    def run_decode(
-        self, return_logprob=False, top_logprobs_num=0, return_text=False, n=1
-    ):
+    def run_decode(self, return_logprob=False, top_logprobs_num=0, n=1):
         response = requests.post(
             self.base_url + "/generate",
             json={
@@ -50,7 +47,6 @@ class TestSRTEndpoint(unittest.TestCase):
                 "stream": False,
                 "return_logprob": return_logprob,
                 "top_logprobs_num": top_logprobs_num,
-                "return_text_in_logprobs": return_text,
                 "logprob_start_len": 0,
             },
         )
@@ -65,13 +61,11 @@ class TestSRTEndpoint(unittest.TestCase):
 
     def test_logprob(self):
         for top_logprobs_num in [0, 3]:
-            for return_text in [False, False]:
-                self.run_decode(
-                    return_logprob=True,
-                    top_logprobs_num=top_logprobs_num,
-                    return_text=return_text,
-                )
+            self.run_decode(
+                return_logprob=True,
+                top_logprobs_num=top_logprobs_num,
+            )
 
 
 if __name__ == "__main__":
-    unittest.main(warnings="ignore")
+    unittest.main()
