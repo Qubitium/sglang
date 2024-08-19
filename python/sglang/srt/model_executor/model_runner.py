@@ -219,7 +219,6 @@ class ModelRunner:
             device_config=device_config,
             load_config=load_config,
             lora_config=None,
-            multimodal_config=None,
             parallel_config=None,
             scheduler_config=None,
             cache_config=None,
