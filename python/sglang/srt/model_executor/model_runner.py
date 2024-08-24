@@ -15,11 +15,11 @@ limitations under the License.
 
 """ModelRunner runs the forward passes of the models."""
 
+import gc
 import importlib
 import importlib.resources
 import logging
 import pkgutil
-import warnings
 from functools import lru_cache
 
 import triton
@@ -45,7 +45,10 @@ from vllm.distributed import (
     get_tp_group,
     init_distributed_environment,
     initialize_model_parallel,
+    set_custom_all_reduce,
 )
+from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import ModelRegistry
 
 from sglang.global_config import global_config
@@ -61,7 +64,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     get_available_gpu_memory,
     is_generation_model,
-    is_llama3_405b_fp8,
+    is_llama3_405b_fp8_head_16,
     is_multimodal_model,
     monkey_patch_vllm_dummy_weight_loader,
     monkey_patch_vllm_p2p_access_check,
@@ -112,6 +115,7 @@ class ModelRunner:
             nccl_init_method = f"tcp://{server_args.nccl_init_addr}"
         else:
             nccl_init_method = f"tcp://127.0.0.1:{self.nccl_port}"
+        set_custom_all_reduce(not server_args.disable_custom_all_reduce)
         init_distributed_environment(
             backend="nccl",
             world_size=self.tp_size,
@@ -121,10 +125,10 @@ class ModelRunner:
         )
 
         initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
-        self.tp_group = get_tp_group()
         total_gpu_memory = get_available_gpu_memory(
             self.gpu_id, distributed=self.tp_size > 1
         )
+        self.tp_group = get_tp_group()
 
         if self.tp_size > 1:
             total_local_gpu_memory = get_available_gpu_memory(self.gpu_id)
@@ -157,6 +161,11 @@ class ModelRunner:
             f"[gpu={self.gpu_id}] Load weight begin. "
             f"avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
+        if torch.cuda.get_device_capability()[0] < 8:
+            logger.info(
+                "Compute capability below sm80 use float16 due to lack of bfloat16 support."
+            )
+            self.server_args.dtype = "float16"
 
         # Load weights
         quant_cfg = getattr(
@@ -181,9 +190,9 @@ class ModelRunner:
         token_attention.REDUCE_TORCH_TYPE = self.torch_dtype
 
         monkey_patch_vllm_dummy_weight_loader()
-        device_config = DeviceConfig()
-        load_config = LoadConfig(load_format=self.server_args.load_format)
-        vllm_model_config = VllmModelConfig(
+        self.device_config = DeviceConfig()
+        self.load_config = LoadConfig(load_format=self.server_args.load_format)
+        self.vllm_model_config = VllmModelConfig(
             model=self.server_args.model_path,
             quantization=self.server_args.quantization,
             tokenizer=None,
@@ -193,35 +202,33 @@ class ModelRunner:
             seed=42,
             skip_tokenizer_init=True,
         )
-        vllm_model_config.dtype = self.torch_dtype
+        self.vllm_model_config.dtype = self.torch_dtype
 
-        if is_llama3_405b_fp8(self.model_config) and self.tp_size <= 8:
+        if is_llama3_405b_fp8_head_16(self.model_config) and self.tp_size <= 8:
             # A temporary hack to fix the num_heads for meta-llama/Meta-Llama-3.1-405B-FP8 checkpoints
             self.model_config.hf_config.num_key_value_heads = 8
-            vllm_model_config.hf_config.num_key_value_heads = 8
+            self.vllm_model_config.hf_config.num_key_value_heads = 8
             monkey_patch_vllm_qvk_linear_loader()
 
-        self.dtype = vllm_model_config.dtype
+        self.dtype = self.vllm_model_config.dtype
         if self.model_config.model_overide_args is not None:
-            vllm_model_config.hf_config.update(self.model_config.model_overide_args)
-
-        if (
-            self.server_args.efficient_weight_load
-            and "llama" in self.server_args.model_path.lower()
-            and self.server_args.quantization == "fp8"
-        ):
-            from sglang.srt.model_loader.model_loader import get_model
-        else:
-            from vllm.model_executor.model_loader import get_model
+            self.vllm_model_config.hf_config.update(
+                self.model_config.model_overide_args
+            )
 
         self.model = get_model(
-            model_config=vllm_model_config,
-            device_config=device_config,
-            load_config=load_config,
+            model_config=self.vllm_model_config,
+            device_config=self.device_config,
+            load_config=self.load_config,
             lora_config=None,
             parallel_config=None,
             scheduler_config=None,
             cache_config=None,
+        )
+        self.sliding_window_size = (
+            self.model.get_window_size()
+            if hasattr(self.model, "get_window_size")
+            else None
         )
         self.is_generation = is_generation_model(
             self.model_config.hf_config.architectures
@@ -233,6 +240,91 @@ class ModelRunner:
             f"dtype={self.dtype}, "
             f"avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
+
+    def update_weights(self, model_path, load_format):
+        from vllm.model_executor.model_loader.loader import (
+            DefaultModelLoader,
+            device_loading_context,
+            get_model_loader,
+        )
+        from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+
+        logger.info(
+            f"[gpu={self.gpu_id}] Update weights begin. "
+            f"avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
+        )
+
+        target_device = torch.device(self.device_config.device)
+
+        try:
+            vllm_model_config = VllmModelConfig(
+                model=model_path,
+                quantization=self.server_args.quantization,
+                tokenizer=None,
+                tokenizer_mode=None,
+                trust_remote_code=self.server_args.trust_remote_code,
+                dtype=self.server_args.dtype,
+                seed=42,
+                skip_tokenizer_init=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to load model config: {e}")
+            return False, "Failed to update model weights"
+
+        load_config = LoadConfig(load_format=load_format)
+
+        # Only support vllm DefaultModelLoader for now
+        loader = get_model_loader(load_config)
+        if not isinstance(loader, DefaultModelLoader):
+            logger.error("Failed to get weights iterator: Unsupported loader")
+            return False, "Failed to update model weights"
+
+        def get_weight_iter(config):
+            iter = loader._get_weights_iterator(
+                config.model,
+                config.revision,
+                fall_back_to_pt=getattr(
+                    self.model, "fall_back_to_pt_during_load", True
+                ),
+            )
+            return iter
+
+        def model_load_weights(model, iter):
+            model.load_weights(iter)
+            for _, module in self.model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                if quant_method is not None:
+                    with device_loading_context(module, target_device):
+                        quant_method.process_weights_after_loading(module)
+            return model
+
+        with set_default_torch_dtype(vllm_model_config.dtype):
+            try:
+                iter = get_weight_iter(vllm_model_config)
+            except Exception as e:
+                message = f"Failed to get weights iterator: {e}"
+                logger.error(message)
+                return False, message
+            try:
+                model = model_load_weights(self.model, iter)
+            except Exception as e:
+                message = f"Failed to update weights: {e}. \n Rolling back to original weights"
+                logger.error(message)
+                del iter
+                gc.collect()
+                iter = get_weight_iter(self.vllm_model_config)
+                self.model = model_load_weights(self.model, iter)
+                return False, message
+
+        self.model = model
+        self.server_args.model_path = model_path
+        self.server_args.load_format = load_format
+        self.vllm_model_config = vllm_model_config
+        self.load_config = load_config
+        self.model_config.path = model_path
+
+        logger.info(f"[gpu={self.gpu_id}] Update weights end.")
+        return True, "Succeeded to update model weights"
 
     def profile_max_num_token(self, total_gpu_memory):
         available_gpu_memory = get_available_gpu_memory(
@@ -267,7 +359,7 @@ class ModelRunner:
         self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
         if max_total_tokens is not None:
             if max_total_tokens > self.max_total_num_tokens:
-                warnings.warn(
+                logging.warning(
                     f"max_total_tokens={max_total_tokens} is larger than the profiled value "
                     f"{self.max_total_num_tokens}. "
                     f"Use the profiled value instead."
@@ -333,6 +425,9 @@ class ModelRunner:
 
     def init_flashinfer(self):
         if self.server_args.disable_flashinfer:
+            assert (
+                self.sliding_window_size is None
+            ), "turn on flashinfer to support window attention"
             self.flashinfer_prefill_wrapper_ragged = None
             self.flashinfer_prefill_wrapper_paged = None
             self.flashinfer_decode_wrapper = None
@@ -346,20 +441,47 @@ class ModelRunner:
         else:
             use_tensor_cores = False
 
-        self.flashinfer_workspace_buffers = torch.empty(
-            2, global_config.flashinfer_workspace_size, dtype=torch.uint8, device="cuda"
-        )
-        self.flashinfer_prefill_wrapper_ragged = BatchPrefillWithRaggedKVCacheWrapper(
-            self.flashinfer_workspace_buffers[0], "NHD"
-        )
-        self.flashinfer_prefill_wrapper_paged = BatchPrefillWithPagedKVCacheWrapper(
-            self.flashinfer_workspace_buffers[1], "NHD"
-        )
-        self.flashinfer_decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-            self.flashinfer_workspace_buffers[0],
-            "NHD",
-            use_tensor_cores=use_tensor_cores,
-        )
+        if self.sliding_window_size is None:
+            self.flashinfer_workspace_buffer = torch.empty(
+                global_config.flashinfer_workspace_size,
+                dtype=torch.uint8,
+                device="cuda",
+            )
+            self.flashinfer_prefill_wrapper_ragged = (
+                BatchPrefillWithRaggedKVCacheWrapper(
+                    self.flashinfer_workspace_buffer, "NHD"
+                )
+            )
+            self.flashinfer_prefill_wrapper_paged = BatchPrefillWithPagedKVCacheWrapper(
+                self.flashinfer_workspace_buffer, "NHD"
+            )
+            self.flashinfer_decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                self.flashinfer_workspace_buffer,
+                "NHD",
+                use_tensor_cores=use_tensor_cores,
+            )
+        else:
+            self.flashinfer_workspace_buffer = torch.empty(
+                global_config.flashinfer_workspace_size,
+                dtype=torch.uint8,
+                device="cuda",
+            )
+            self.flashinfer_prefill_wrapper_ragged = None
+            self.flashinfer_prefill_wrapper_paged = []
+            self.flashinfer_decode_wrapper = []
+            for i in range(2):
+                self.flashinfer_prefill_wrapper_paged.append(
+                    BatchPrefillWithPagedKVCacheWrapper(
+                        self.flashinfer_workspace_buffer, "NHD"
+                    )
+                )
+                self.flashinfer_decode_wrapper.append(
+                    BatchDecodeWithPagedKVCacheWrapper(
+                        self.flashinfer_workspace_buffer,
+                        "NHD",
+                        use_tensor_cores=use_tensor_cores,
+                    )
+                )
 
     def init_cuda_graphs(self):
         from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
@@ -376,6 +498,7 @@ class ModelRunner:
             self,
             max_batch_size_to_capture=max(batch_size_list),
             use_torch_compile=self.server_args.enable_torch_compile,
+            disable_padding=self.server_args.disable_cuda_graph_padding,
         )
         try:
             self.cuda_graph_runner.capture(batch_size_list)
@@ -395,7 +518,9 @@ class ModelRunner:
             return self.cuda_graph_runner.replay(batch)
 
         input_metadata = InputMetadata.from_schedule_batch(
-            self, batch, ForwardMode.DECODE
+            self,
+            batch,
+            ForwardMode.DECODE,
         )
 
         return self.model.forward(
@@ -405,7 +530,9 @@ class ModelRunner:
     @torch.inference_mode()
     def forward_extend(self, batch: ScheduleBatch):
         input_metadata = InputMetadata.from_schedule_batch(
-            self, batch, forward_mode=ForwardMode.EXTEND
+            self,
+            batch,
+            forward_mode=ForwardMode.EXTEND,
         )
         return self.model.forward(
             batch.input_ids, input_metadata.positions, input_metadata
@@ -414,7 +541,9 @@ class ModelRunner:
     @torch.inference_mode()
     def forward_extend_multi_modal(self, batch: ScheduleBatch):
         input_metadata = InputMetadata.from_schedule_batch(
-            self, batch, forward_mode=ForwardMode.EXTEND
+            self,
+            batch,
+            forward_mode=ForwardMode.EXTEND,
         )
         return self.model.forward(
             batch.input_ids,

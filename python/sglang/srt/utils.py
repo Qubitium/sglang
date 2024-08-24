@@ -44,7 +44,6 @@ from typing import (
 
 from fastapi.responses import JSONResponse
 from packaging import version as pkg_version
-from starlette.middleware.base import BaseHTTPMiddleware
 import asyncio
 from torch.nn.parameter import Parameter
 from triton.runtime.cache import (
@@ -432,14 +431,11 @@ def kill_parent_process():
     """Kill the parent process and all children of the parent process."""
     current_process = psutil.Process()
     parent_process = current_process.parent()
-    children = parent_process.children(recursive=True)
-    for child in children:
-        if child.pid != current_process.pid:
-            os.kill(child.pid, 9)
-    os.kill(parent_process.pid, 9)
+    kill_child_process(parent_process.pid, skip_pid=current_process.pid)
 
 
-def kill_child_process(pid, including_parent=True):
+def kill_child_process(pid, including_parent=True, skip_pid=None):
+    """Kill the process and all its children process."""
     try:
         parent = psutil.Process(pid)
     except psutil.NoSuchProcess:
@@ -447,6 +443,8 @@ def kill_child_process(pid, including_parent=True):
 
     children = parent.children(recursive=True)
     for child in children:
+        if child.pid == skip_pid:
+            continue
         try:
             child.kill()
         except psutil.NoSuchProcess:
@@ -706,7 +704,7 @@ def set_ulimit(target_soft_limit=65535):
             logger.warn(f"Fail to set RLIMIT_NOFILE: {e}")
 
 
-def is_llama3_405b_fp8(model_config):
+def is_llama3_405b_fp8_head_16(model_config):
     """Return whether the model is meta-llama/Meta-Llama-3.1-405B-FP8 with 16 kv heads."""
     if (
         model_config.hf_config.architectures[0] == "LlamaForCausalLM"

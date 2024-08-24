@@ -8,19 +8,21 @@ from typing import List, Optional, Union
 from sglang.global_config import global_config
 from sglang.lang.choices import ChoicesSamplingMethod
 
-REGEX_INT = r"[-+]?[0-9]+"
-REGEX_FLOAT = r"[-+]?[0-9]*\.?[0-9]+"
+REGEX_INT = r"[-+]?[0-9]+[ \n]*"
+REGEX_FLOAT = r"[-+]?[0-9]*\.?[0-9]+[ \n]*"
 REGEX_BOOL = r"(True|False)"
-REGEX_STRING = r"\"[\w\d\s]*\""  # bugs with regex r"\".*\"" in interegular pkg
+REGEX_STR = r"\"[\w\d\s]*\""  # bugs with regex r"\".*\"" in interegular pkg
 
 
 @dataclasses.dataclass
 class SglSamplingParams:
     max_new_tokens: int = 128
     stop: Union[str, List[str]] = ()
+    stop_token_ids: Optional[List[int]] = ()
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1  # -1 means disable
+    min_p: float = 0.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
     repetition_penalty: float = 1.0
@@ -38,9 +40,11 @@ class SglSamplingParams:
         return SglSamplingParams(
             self.max_new_tokens,
             self.stop,
+            self.stop_token_ids,
             self.temperature,
             self.top_p,
             self.top_k,
+            self.min_p,
             self.frequency_penalty,
             self.presence_penalty,
             self.repetition_penalty,
@@ -110,9 +114,11 @@ class SglSamplingParams:
         return {
             "max_new_tokens": self.max_new_tokens,
             "stop": self.stop,
+            "stop_token_ids": self.stop_token_ids,
             "temperature": self.temperature,
             "top_p": self.top_p,
             "top_k": self.top_k,
+            "min_p": self.min_p,
             "frequency_penalty": self.frequency_penalty,
             "presence_penalty": self.presence_penalty,
             "repetition_penalty": self.repetition_penalty,
@@ -144,10 +150,12 @@ class SglFunction:
         self,
         *args,
         max_new_tokens: int = 128,
-        stop: Union[str, List[str]] = (),
+        stop: Union[str, List[str]] = [],
+        stop_token_ids: Optional[List[int]] = [],
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
+        min_p: float = 0.0,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
         repetition_penalty: float = 1.0,
@@ -165,9 +173,11 @@ class SglFunction:
         default_sampling_para = SglSamplingParams(
             max_new_tokens=max_new_tokens,
             stop=stop,
+            stop_token_ids=stop_token_ids,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
@@ -186,9 +196,11 @@ class SglFunction:
         *,
         max_new_tokens: int = 128,
         stop: Union[str, List[str]] = (),
+        stop_token_ids: Optional[List[int]] = [],
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
+        min_p: float = 0.0,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
         repetition_penalty: float = 1.0,
@@ -224,9 +236,11 @@ class SglFunction:
         default_sampling_para = SglSamplingParams(
             max_new_tokens=max_new_tokens,
             stop=stop,
+            stop_token_ids=stop_token_ids,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
@@ -404,9 +418,11 @@ class SglGen(SglExpr):
         name: Optional[str] = None,
         max_new_tokens: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        stop_token_ids: Optional[List[int]] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
+        min_p: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         repetition_penalty: Optional[float] = None,
@@ -424,9 +440,11 @@ class SglGen(SglExpr):
         self.sampling_params = SglSamplingParams(
             max_new_tokens=max_new_tokens,
             stop=stop,
+            stop_token_ids=stop_token_ids,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,

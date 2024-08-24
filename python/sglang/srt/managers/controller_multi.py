@@ -19,14 +19,12 @@ Each data parallel worker can manage multiple tensor parallel workers.
 """
 
 import dataclasses
-import asyncio
 import logging
 import queue
-from enum import Enum, auto
-from typing import Dict
 import multiprocessing
 import os
 import psutil
+from enum import Enum, auto
 
 import numpy as np
 
@@ -267,6 +265,4 @@ def start_controller_process(
     except Exception:
         logger.error("Exception in ControllerMulti:\n" + get_exception_traceback())
     finally:
-        for w in controller.workers:
-            os.kill(w.proc.pid, 9)
         kill_parent_process()

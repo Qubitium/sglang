@@ -17,7 +17,6 @@ limitations under the License.
 
 import logging
 import multiprocessing
-import os
 import queue
 from typing import List
 
@@ -196,6 +195,4 @@ def start_controller_process(
     except Exception:
         logger.error("Exception in ControllerSingle:\n" + get_exception_traceback())
     finally:
-        for t in controller.tp_procs:
-            os.kill(t.pid, 9)
         kill_parent_process()

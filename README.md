@@ -55,7 +55,7 @@ pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
 ### Method 2: From source
 ```
 # Use the last release branch
-git clone -b v0.2.11 https://github.com/sgl-project/sglang.git
+git clone -b v0.2.13 https://github.com/sgl-project/sglang.git
 cd sglang
 
 pip install --upgrade pip
@@ -76,11 +76,63 @@ docker run --gpus all \
     --env "HF_TOKEN=<secret>" \
     --ipc=host \
     lmsysorg/sglang:latest \
-    python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --host 0.0.0.0 --port 30000
+    python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-8B-Instruct --host 0.0.0.0 --port 30000
 ```
 
+### Method 4: Using docker compose
+
+<details>
+
+> This method is recommended if you plan to serve it as a service.
+> A better approach is to use the [k8s-sglang-service.yaml](./docker/k8s-sglang-service.yaml).
+
+1. Copy the [compose.yml](./docker/compose.yaml) to your local machine
+2. Execute the command `docker compose up -d` in your terminal.
+</details>
+
+### Method 5: Run on Kubernetes or Clouds with SkyPilot
+
+<details>
+
+To deploy on Kubernetes or 12+ clouds, you can use [SkyPilot](https://github.com/skypilot-org/skypilot).
+
+1. Install SkyPilot and set up Kubernetes cluster or cloud access: see [SkyPilot's documentation](https://skypilot.readthedocs.io/en/latest/getting-started/installation.html).
+2. Deploy on your own infra with a single command and get the HTTP API endpoint:
+<details>
+<summary>SkyPilot YAML: <code>sglang.yaml</code></summary>
+
+```yaml
+# sglang.yaml
+envs:
+  HF_TOKEN: null
+
+resources:
+  image_id: docker:lmsysorg/sglang:latest
+  accelerators: A100
+  ports: 30000
+
+run: |
+  conda deactivate
+  python3 -m sglang.launch_server \
+    --model-path meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --host 0.0.0.0 \
+    --port 30000
+```
+</details>
+
+```bash
+# Deploy on any cloud or Kubernetes cluster. Use --cloud <cloud> to select a specific cloud provider.
+HF_TOKEN=<secret> sky launch -c sglang --env HF_TOKEN sglang.yaml
+
+# Get the HTTP API endpoint
+sky status --endpoint 30000 sglang
+```
+3. To further scale up your deployment with autoscaling and failure recovery, check out the [SkyServe + SGLang guide](https://github.com/skypilot-org/skypilot/tree/master/llm/sglang#serving-llama-2-with-sglang-for-more-traffic-using-skyserve).
+</details>
+
+
 ### Common Notes
-- If you cannot install FlashInfer, check out its [installation](https://docs.flashinfer.ai/installation.html#) page. If you still cannot install it, you can use the slower Triton kernels by adding `--disable-flashinfer` when launching the server.
+- [FlashInfer](https://github.com/flashinfer-ai/flashinfer) is currently one of the dependencies that must be installed for SGLang. If you are using NVIDIA GPU devices below sm80, such as T4, you can't use SGLang for the time being. We expect to resolve this issue soon, so please stay tuned. If you encounter any FlashInfer-related issues on sm80+ devices (e.g., A100, L40S, H100), consider using Triton's kernel by `--disable-flashinfer --disable-flashinfer-sampling` and raise a issue.
 - If you only need to use the OpenAI backend, you can avoid installing other dependencies by using `pip install "sglang[openai]"`.
 
 ## Backend: SGLang Runtime (SRT)
@@ -154,7 +206,7 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 - See [hyperparameter_tuning.md](docs/en/hyperparameter_tuning.md) on tuning hyperparameters for better performance.
 - If you see out-of-memory errors during prefill for long prompts, try to set a smaller chunked prefill size.
 ```
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000 --chunked-prefill-size 2048
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000 --chunked-prefill-size 4096
 ```
 - Add `--nnodes 2` to run tensor parallelism on multiple nodes. If you have two nodes with two GPUs on each node and want to run TP=4, let `sgl-dev-0` be the hostname of the first node and `50000` be an available port.
 ```
@@ -179,8 +231,13 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
   - `python -m sglang.launch_server --model-path liuhaotian/llava-v1.5-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --chat-template vicuna_v1.1 --port 30000`
   - `python -m sglang.launch_server --model-path liuhaotian/llava-v1.6-vicuna-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --chat-template vicuna_v1.1 --port 30000`
   - `python -m sglang.launch_server --model-path liuhaotian/llava-v1.6-34b --tokenizer-path liuhaotian/llava-v1.6-34b-tokenizer --port 30000`
+  - `python -m sglang.launch_server --model-path lmms-lab/llama3-llava-next-8b --port=30000 --host=127.0.0.1 --tp-size=1 --chat-template=llava_llama_3`
+  - `python -m sglang.launch_server --model-path lmms-lab/llava-next-72b --port=30000 --host="127.0.0.1" --tp-size=8 --chat-template=chatml-llava`
 - LLaVA-NeXT-Video
   - see [examples/usage/llava_video](examples/usage/llava_video)
+- [LLaVA-OneVision](https://arxiv.org/abs/2408.03326)
+  - `python3 -m sglang.launch_server --model-path lmms-lab/llava-onevision-qwen2-72b-ov --port=30000 --host=127.0.0.1 --tp-size=8 --chat-template=chatml-llava --chunked-prefill-size=16384`
+  - see [test/srt/test_llava_onevision_openai_server.py](test/srt/test_llava_onevision_openai_server.py)
 - Yi-VL
   - see [srt_example_yi_vl.py](examples/quick_start/srt_example_yi_vl.py).
 - StableLM

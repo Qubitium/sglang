@@ -35,13 +35,13 @@ class SamplingParams:
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
+        min_p: float = 0.0,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
         repetition_penalty: float = 1.0,
         ignore_eos: bool = False,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
-        dtype: Optional[str] = None,
         regex: Optional[str] = None,
         logits_processors: Optional[List[CustomLogitsProcessor]] = None,
         n: int = 1,
@@ -49,6 +49,7 @@ class SamplingParams:
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
+        self.min_p = min_p
         self.frequency_penalty = frequency_penalty
         self.presence_penalty = presence_penalty
         self.repetition_penalty = repetition_penalty
@@ -59,7 +60,6 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
-        self.dtype = dtype
         self.regex = regex
         self.logits_processors = logits_processors if logits_processors else []
         self.n = n
@@ -70,8 +70,6 @@ class SamplingParams:
             self.top_k = 1
         if self.top_k == -1:
             self.top_k = 1 << 30  # whole vocabulary
-        if self.dtype == "int":
-            self.stop_strs = [" ", "\n"]
 
     def verify(self):
         if self.temperature < 0.0:
@@ -80,6 +78,8 @@ class SamplingParams:
             )
         if not 0.0 < self.top_p <= 1.0:
             raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
+        if not 0.0 <= self.min_p <= 1.0:
+            raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(
                 f"top_k must be -1 (disable), or at least 1, " f"got {self.top_k}."
@@ -134,3 +134,17 @@ class SamplingParams:
                 else:
                     stop_str_max_len = max(stop_str_max_len, len(stop_str))
             self.stop_str_max_len = stop_str_max_len
+
+    def to_srt_kwargs(self):
+        return {
+            "max_new_tokens": self.max_new_tokens,
+            "stop": self.stop_strs,
+            "stop_token_ids": list(self.stop_token_ids),
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "frequency_penalty": self.frequency_penalty,
+            "presence_penalty": self.presence_penalty,
+            "ignore_eos": self.ignore_eos,
+            "regex": self.regex,
+        }
