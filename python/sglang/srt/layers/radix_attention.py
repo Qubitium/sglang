@@ -20,6 +20,7 @@ from typing import Optional
 import torch
 from flashinfer.cascade import merge_state
 from torch import nn
+import torch.nn.functional as F
 
 from sglang.global_config import global_config
 from sglang.srt.layers.decode_attention import decode_attention_fwd
@@ -92,6 +93,21 @@ class RadixAttention(nn.Module):
 
         return o
 
+    def padding(self, x: torch.Tensor):
+        if self.head_dim == 96:
+            pad_size = 128 - x.size(-1)
+            x_padded = F.pad(x, (0, pad_size))
+            return x_padded
+        else:
+            return x
+
+    def de_padding(self, x: torch.Tensor):
+        if self.head_dim == 96:
+            x_unpadded = x[:, :, :96]
+            return x_unpadded.contiguous()
+        else:
+            return x
+
     def decode_forward_triton(self, q, k, v, input_metadata: InputMetadata):
         if self.qk_head_dim != self.v_head_dim:
             o = q.new_empty((q.shape[0], self.tp_q_head_num * self.v_head_dim))
@@ -128,10 +144,10 @@ class RadixAttention(nn.Module):
         if not input_metadata.flashinfer_use_ragged:
             if k is not None:
                 assert v is not None
-                self.store_kv_cache(k, v, input_metadata)
+                self.store_kv_cache(self.padding(k), self.padding(v), input_metadata)
 
             o = prefill_wrapper_paged.forward(
-                q.contiguous().view(-1, self.tp_q_head_num, self.head_dim),
+                self.padding(q.contiguous().view(-1, self.tp_q_head_num, self.head_dim)),
                 input_metadata.token_to_kv_pool.get_kv_buffer(self.layer_id),
                 causal=True,
                 sm_scale=self.scaling,
@@ -141,9 +157,9 @@ class RadixAttention(nn.Module):
         else:
             o1, s1 = (
                 input_metadata.flashinfer_prefill_wrapper_ragged.forward_return_lse(
-                    q.contiguous().view(-1, self.tp_q_head_num, self.head_dim),
-                    k.contiguous().view(-1, self.tp_k_head_num, self.head_dim),
-                    v.contiguous().view(-1, self.tp_v_head_num, self.head_dim),
+                    self.padding(q.contiguous().view(-1, self.tp_q_head_num, self.head_dim)),
+                    self.padding(k.contiguous().view(-1, self.tp_k_head_num, self.head_dim)),
+                    self.padding(v.contiguous().view(-1, self.tp_v_head_num, self.head_dim)),
                     causal=True,
                     sm_scale=self.scaling,
                     logits_soft_cap=self.logit_cap,
@@ -154,7 +170,7 @@ class RadixAttention(nn.Module):
                 o = o1
             else:
                 o2, s2 = prefill_wrapper_paged.forward_return_lse(
-                    q.contiguous().view(-1, self.tp_q_head_num, self.head_dim),
+                    self.padding(q.contiguous().view(-1, self.tp_q_head_num, self.head_dim)),
                     input_metadata.token_to_kv_pool.get_kv_buffer(self.layer_id),
                     causal=False,
                     sm_scale=self.scaling,
@@ -167,6 +183,7 @@ class RadixAttention(nn.Module):
 
             if input_metadata.total_num_tokens >= global_config.layer_sync_threshold:
                 torch.cuda.synchronize()
+        o = self.de_padding(o)
 
         return o.view(-1, self.tp_q_head_num * self.head_dim)
 
@@ -180,14 +197,15 @@ class RadixAttention(nn.Module):
 
         if k is not None:
             assert v is not None
-            self.store_kv_cache(k, v, input_metadata)
+            self.store_kv_cache(self.padding(k), self.padding(v), input_metadata)
 
         o = decode_wrapper.forward(
-            q.contiguous().view(-1, self.tp_q_head_num, self.head_dim),
+            self.padding(q.contiguous().view(-1, self.tp_q_head_num, self.head_dim)),
             input_metadata.token_to_kv_pool.get_kv_buffer(self.layer_id),
             sm_scale=self.scaling,
             logits_soft_cap=self.logit_cap,
         )
+        o = self.de_padding(o)
 
         return o.view(-1, self.tp_q_head_num * self.head_dim)
 

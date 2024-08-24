@@ -88,6 +88,8 @@ class ModelRunner:
     ):
         # Parse args
         self.model_config = model_config
+        if self.model_config.head_dim == 96:
+            self.model_config.head_dim = 128
         self.mem_fraction_static = mem_fraction_static
         self.gpu_id = gpu_id
         self.tp_rank = tp_rank
