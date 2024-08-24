@@ -78,7 +78,7 @@ class ServerArgs:
     disable_flashinfer_sampling: bool = False
     disable_radix_cache: bool = False
     disable_regex_jump_forward: bool = False
-    disable_cuda_graph: bool = False
+    disable_cuda_graph: bool = True
     disable_cuda_graph_padding: bool = False
     disable_disk_cache: bool = False
     enable_mixed_chunk: bool = False
