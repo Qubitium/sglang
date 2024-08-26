@@ -388,3 +388,5 @@ class LlamaForCausalLM(nn.Module):
 
 
 EntryClass = LlamaForCausalLM
+# compat: e5-mistral model.config class == MistralModel
+EntryClassRemapping = [("Phi3ForCausalLM", LlamaForCausalLM)]
