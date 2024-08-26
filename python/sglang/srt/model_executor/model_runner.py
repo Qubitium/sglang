@@ -227,7 +227,7 @@ class ModelRunner:
             scheduler_config=None,
             cache_config=None,
         )
-        self.sliding_window_size = (
+        self.sliding_window_size = None if self.server_args.disable_sliding_window else (
             self.model.get_window_size()
             if hasattr(self.model, "get_window_size")
             else None

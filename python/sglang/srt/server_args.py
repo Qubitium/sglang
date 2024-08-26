@@ -74,6 +74,7 @@ class ServerArgs:
     load_balance_method: str = "round_robin"
 
     # Optimization/debug options
+    disable_sliding_window: bool = False
     disable_flashinfer: bool = False
     disable_flashinfer_sampling: bool = False
     disable_radix_cache: bool = False
