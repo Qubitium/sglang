@@ -602,6 +602,9 @@ def import_model_classes():
 
 def _try_load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
     model_arch_name_to_cls = import_model_classes()
+    # mapping Phi3ForCausalLM to LlamaForCausalLM
+    if model_arch == "Phi3ForCausalLM":
+        model_arch = "LlamaForCausalLM"
     if model_arch not in model_arch_name_to_cls:
         raise ValueError(
             f"Unsupported architectures: {model_arch}. "
