@@ -49,7 +49,7 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.managers.schedule_batch import FINISH_MATCHED_STR
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling.sampling_params import SamplingParams
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_generation_model, is_multimodal_model, load_image
 from sglang.utils import find_printable_text, get_exception_traceback
 
@@ -345,8 +345,7 @@ class TokenizerManager:
         state = ReqState([], False, event)
         self.rid_to_state[rid] = state
         self.pending += 1
-        # print(f"PENDING {self.pending}")
-        # print(f"tokenizer generate_request single request")
+        # print(f"single request PENDING {self.pending}")
 
         if not is_cache_for_prefill:
             async for response in self._wait_for_response(
@@ -446,6 +445,8 @@ class TokenizerManager:
                 event = asyncio.Event()
                 state = ReqState([], False, event)
                 self.rid_to_state[rid] = state
+                self.pending += 1
+                # print(f"batch request PENDING {self.pending}", batch_size)
 
                 generators.append(
                     self._wait_for_response(
@@ -737,6 +738,8 @@ class TokenizerManager:
             if self.tokenizer is None:
                 # Send BatchTokenIDOut if no tokenizer init'ed.
                 return recv_obj_detokenizer
+            elif isinstance(recv_obj_detokenizer, UpdateWeightReqOutput):
+                return recv_obj_detokenizer
             else:
                 # Initialize decode status
                 read_ids, surr_ids = [], []
@@ -759,56 +762,56 @@ class TokenizerManager:
                     read_ids.append(s.decode_ids[s.surr_offset:])
                     surr_ids.append(s.decode_ids[s.surr_offset: s.read_offset])
 
-                    # TODO(lmzheng): handle skip_special_tokens/spaces_between_special_tokens per request
-                    def batch_decode_surr():
-                        return self.tokenizer.batch_decode(surr_ids,
-                                                           skip_special_tokens=
-                                                           recv_obj_detokenizer.skip_special_tokens[
-                                                               0],
-                                                           spaces_between_special_tokens=
-                                                           recv_obj_detokenizer.spaces_between_special_tokens[0])
+                # TODO(lmzheng): handle skip_special_tokens/spaces_between_special_tokens per request
+                def batch_decode_surr():
+                    return self.tokenizer.batch_decode(surr_ids,
+                                                       skip_special_tokens=
+                                                       recv_obj_detokenizer.skip_special_tokens[
+                                                           0],
+                                                       spaces_between_special_tokens=
+                                                       recv_obj_detokenizer.spaces_between_special_tokens[0])
 
-                    def batch_decode_read():
-                        return self.tokenizer.batch_decode(read_ids,
-                                                           skip_special_tokens=
-                                                           recv_obj_detokenizer.skip_special_tokens[
-                                                               0],
-                                                           spaces_between_special_tokens=
-                                                           recv_obj_detokenizer.spaces_between_special_tokens[0])
+                def batch_decode_read():
+                    return self.tokenizer.batch_decode(read_ids,
+                                                       skip_special_tokens=
+                                                       recv_obj_detokenizer.skip_special_tokens[
+                                                           0],
+                                                       spaces_between_special_tokens=
+                                                       recv_obj_detokenizer.spaces_between_special_tokens[0])
 
-                    surr_texts = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, batch_decode_surr)
-                    read_texts = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, batch_decode_read)
+                surr_texts = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, batch_decode_surr)
+                read_texts = await asyncio.get_event_loop().run_in_executor(THREAD_POOL, batch_decode_read)
 
-                    # Trim stop str
-                    # TODO(lmzheng): handle the case where multiple stop strs are hit
-                    output_strs = []
-                    for i in range(bs):
-                        s = self.decode_status[recv_obj_detokenizer.rids[i]]
-                        new_text = read_texts[i][len(surr_texts[i]):]
-                        if recv_obj_detokenizer.finished_reason[i] is None:
-                            # Streaming chunk: update the decode status
-                            if len(new_text) > 0 and not new_text.endswith("�"):
-                                s.decoded_text = s.decoded_text + new_text
-                                s.surr_offset = s.read_offset
-                                s.read_offset = len(s.decode_ids)
-                                new_text = ""
-                            else:
-                                new_text = find_printable_text(new_text)
+                # Trim stop str
+                # TODO(lmzheng): handle the case where multiple stop strs are hit
+                output_strs = []
+                for i in range(bs):
+                    s = self.decode_status[recv_obj_detokenizer.rids[i]]
+                    new_text = read_texts[i][len(surr_texts[i]):]
+                    if recv_obj_detokenizer.finished_reason[i] is None:
+                        # Streaming chunk: update the decode status
+                        if len(new_text) > 0 and not new_text.endswith("�"):
+                            s.decoded_text = s.decoded_text + new_text
+                            s.surr_offset = s.read_offset
+                            s.read_offset = len(s.decode_ids)
+                            new_text = ""
+                        else:
+                            new_text = find_printable_text(new_text)
 
-                        output_strs.append(s.decoded_text + new_text)
+                    output_strs.append(s.decoded_text + new_text)
 
-                        if isinstance(recv_obj_detokenizer.finished_reason[i], FINISH_MATCHED_STR):
-                            pos = output_strs[i].find(recv_obj_detokenizer.finished_reason[i].matched)
-                            if pos != -1:
-                                output_strs[i] = output_strs[i][:pos]
+                    if isinstance(recv_obj_detokenizer.finished_reason[i], FINISH_MATCHED_STR):
+                        pos = output_strs[i].find(recv_obj_detokenizer.finished_reason[i].matched)
+                        if pos != -1:
+                            output_strs[i] = output_strs[i][:pos]
 
-                    # print(f"detokenizer tokenizer_chan put",recv_obj_detokenizer.rids)
-                    return BatchStrOut(
-                        rids=recv_obj_detokenizer.rids,
-                        output_strs=output_strs,
-                        meta_info=recv_obj_detokenizer.meta_info,
-                        finished_reason=recv_obj_detokenizer.finished_reason,
-                    )
+                # print(f"detokenizer tokenizer_chan put",recv_obj_detokenizer.rids)
+                return BatchStrOut(
+                    rids=recv_obj_detokenizer.rids,
+                    output_strs=output_strs,
+                    meta_info=recv_obj_detokenizer.meta_info,
+                    finished_reason=recv_obj_detokenizer.finished_reason,
+                )
 
     def convert_logprob_style(
             self,
@@ -852,7 +855,6 @@ class TokenizerManager:
             (logprob, token_id, token_text)
             for (logprob, token_id), token_text, in zip(token_logprobs, token_texts)
         ]
-
 
     def detokenize_top_logprobs_tokens(self, top_logprobs, decode_to_text: bool):
         # TODO: The current implementation only batches the detokenization for top-k tokens per single position.
