@@ -20,7 +20,7 @@ import torch
 
 _SAMPLING_EPS = 1e-6
 
-CustomLogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
+CustomLogitsProcessor = Callable[[List[int], torch.Tensor, int], torch.Tensor]
 """CustomLogitsProcessor is a function that takes a list of previously generated
 tokens and a tensor of the logits for the next token, and returns a modified
 tensor of logits to sample from."""
