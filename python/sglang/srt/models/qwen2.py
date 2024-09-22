@@ -51,6 +51,7 @@ class Qwen2MLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -58,12 +59,14 @@ class Qwen2MLP(nn.Module):
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj"
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj"
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -90,6 +93,7 @@ class Qwen2Attention(nn.Module):
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 32768,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -121,12 +125,14 @@ class Qwen2Attention(nn.Module):
             self.total_num_kv_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -164,6 +170,7 @@ class Qwen2DecoderLayer(nn.Module):
         config: Qwen2Config,
         layer_id: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -179,12 +186,14 @@ class Qwen2DecoderLayer(nn.Module):
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -221,6 +230,7 @@ class Qwen2Model(nn.Module):
         self,
         config: Qwen2Config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
@@ -232,7 +242,7 @@ class Qwen2Model(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                Qwen2DecoderLayer(config, i, quant_config=quant_config)
+                Qwen2DecoderLayer(config, i, quant_config=quant_config, prefix=f"model.layers.{i}")
                 for i in range(config.num_hidden_layers)
             ]
         )
@@ -272,7 +282,7 @@ class Qwen2ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = Qwen2Model(config, quant_config=quant_config)
+        self.model = Qwen2Model(config, quant_config=quant_config, prefix="model")
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config)
 
