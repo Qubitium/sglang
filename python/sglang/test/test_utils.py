@@ -2,13 +2,12 @@
 
 import argparse
 import asyncio
-import multiprocessing
 import os
 import subprocess
 import threading
 import time
-import unittest
 from functools import partial
+from types import SimpleNamespace
 from typing import Callable, List, Optional
 
 import numpy as np
@@ -16,24 +15,37 @@ import requests
 import torch
 import torch.nn.functional as F
 
+from sglang.bench_serving import run_benchmark
 from sglang.global_config import global_config
 from sglang.lang.backend.openai import OpenAI
 from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
+from sglang.srt.utils import kill_child_process
 from sglang.utils import get_exception_traceback
 
+DEFAULT_FP8_MODEL_NAME_FOR_TEST = "neuralmagic/Meta-Llama-3.1-8B-FP8"
 DEFAULT_MODEL_NAME_FOR_TEST = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 DEFAULT_MOE_MODEL_NAME_FOR_TEST = "mistralai/Mixtral-8x7B-Instruct-v0.1"
+DEFAULT_MLA_MODEL_NAME_FOR_TEST = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+DEFAULT_MLA_FP8_MODEL_NAME_FOR_TEST = "neuralmagic/DeepSeek-Coder-V2-Lite-Instruct-FP8"
+DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH = 600
+DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP1 = "meta-llama/Meta-Llama-3.1-8B-Instruct,mistralai/Mistral-7B-Instruct-v0.3,deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct,google/gemma-2-27b-it"
+DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP2 = "meta-llama/Meta-Llama-3.1-70B-Instruct,mistralai/Mixtral-8x7B-Instruct-v0.1,Qwen/Qwen2-57B-A14B-Instruct,deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP1 = "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8,neuralmagic/Mistral-7B-Instruct-v0.3-FP8,neuralmagic/DeepSeek-Coder-V2-Lite-Instruct-FP8,neuralmagic/gemma-2-2b-it-FP8"
+DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP2 = "neuralmagic/Meta-Llama-3.1-70B-Instruct-FP8,neuralmagic/Mixtral-8x7B-Instruct-v0.1-FP8,neuralmagic/Qwen2-72B-Instruct-FP8,neuralmagic/Qwen2-57B-A14B-Instruct-FP8,neuralmagic/DeepSeek-Coder-V2-Lite-Instruct-FP8"
+DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_QUANT_TP1 = "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4,hugging-quants/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4"
 
-if os.getenv("SGLANG_IS_IN_CI", "false") == "true":
-    DEFAULT_URL_FOR_MOE_TEST = "http://127.0.0.1:6157"
-    DEFAULT_URL_FOR_ACCURACY_TEST = "http://127.0.0.1:7157"
-    DEFAULT_URL_FOR_UNIT_TEST = "http://127.0.0.1:8157"
-    DEFAULT_URL_FOR_E2E_TEST = "http://127.0.0.1:9157"
+
+def is_in_ci():
+    """Return whether it is in CI runner."""
+    return os.getenv("SGLANG_IS_IN_CI", "false") == "true"
+
+
+if is_in_ci():
+    DEFAULT_PORT_FOR_SRT_TEST_RUNNER = 5157
+    DEFAULT_URL_FOR_TEST = "http://127.0.0.1:6157"
 else:
-    DEFAULT_URL_FOR_MOE_TEST = "http://127.0.0.1:1157"
-    DEFAULT_URL_FOR_ACCURACY_TEST = "http://127.0.0.1:1257"
-    DEFAULT_URL_FOR_UNIT_TEST = "http://127.0.0.1:1357"
-    DEFAULT_URL_FOR_E2E_TEST = "http://127.0.0.1:1457"
+    DEFAULT_PORT_FOR_SRT_TEST_RUNNER = 1157
+    DEFAULT_URL_FOR_TEST = "http://127.0.0.1:2157"
 
 
 def call_generate_lightllm(prompt, temperature, max_tokens, stop=None, url=None):
@@ -296,7 +308,6 @@ def add_common_sglang_args_and_parse(parser: argparse.ArgumentParser):
 def select_sglang_backend(args: argparse.Namespace):
     if args.backend.startswith("srt"):
         if args.backend == "srt-no-parallel":
-            global_config.enable_parallel_decoding = False
             global_config.enable_parallel_encoding = False
         backend = RuntimeEndpoint(f"{args.host}:{args.port}")
     elif args.backend.startswith("gpt-"):
@@ -465,37 +476,149 @@ def run_unittest_files(files: List[str], timeout_per_file: float):
     success = True
 
     for filename in files:
+        global process
 
-        def func():
-            print(f"\n\nRun {filename}\n\n")
-            ret = unittest.main(module=None, argv=["", "-vb"] + [filename])
-
-        p = multiprocessing.Process(target=func)
-
-        def run_one_file():
-            p.start()
-            p.join()
+        def run_one_file(filename):
+            filename = os.path.join(os.getcwd(), filename)
+            print(f"\n\nRun:\npython3 {filename}\n\n", flush=True)
+            process = subprocess.Popen(
+                ["python3", filename], stdout=None, stderr=None, env=os.environ
+            )
+            process.wait()
+            return process.returncode
 
         try:
-            run_with_timeout(run_one_file, timeout=timeout_per_file)
-            if p.exitcode != 0:
-                success = False
-                break
+            ret_code = run_with_timeout(
+                run_one_file, args=(filename,), timeout=timeout_per_file
+            )
+            assert ret_code == 0
         except TimeoutError:
-            p.terminate()
+            kill_child_process(process.pid)
             time.sleep(5)
             print(
-                f"\nTimeout after {timeout_per_file} seconds when running {filename}\n"
+                f"\nTimeout after {timeout_per_file} seconds when running {filename}\n",
+                flush=True,
             )
-            return False
+            success = False
+            break
 
     if success:
-        print(f"Success. Time elapsed: {time.time() - tic:.2f}s")
+        print(f"Success. Time elapsed: {time.time() - tic:.2f}s", flush=True)
     else:
-        print(f"Fail. Time elapsed: {time.time() - tic:.2f}s")
+        print(f"Fail. Time elapsed: {time.time() - tic:.2f}s", flush=True)
 
     return 0 if success else -1
 
 
 def get_similarities(vec1, vec2):
     return F.cosine_similarity(torch.tensor(vec1), torch.tensor(vec2), dim=0)
+
+
+def run_bench_serving(model, num_prompts, request_rate, other_server_args):
+    # Launch the server
+    base_url = DEFAULT_URL_FOR_TEST
+    process = popen_launch_server(
+        model,
+        base_url,
+        timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+        other_args=other_server_args,
+    )
+
+    # Run benchmark
+    args = SimpleNamespace(
+        backend="sglang",
+        base_url=base_url,
+        host=None,
+        port=None,
+        dataset_name="random",
+        dataset_path="",
+        model=None,
+        tokenizer=None,
+        num_prompts=num_prompts,
+        sharegpt_output_len=None,
+        random_input_len=4096,
+        random_output_len=2048,
+        random_range_ratio=0.0,
+        request_rate=request_rate,
+        multi=None,
+        seed=0,
+        output_file=None,
+        disable_tqdm=False,
+        disable_stream=False,
+        disable_ignore_eos=False,
+        extra_request_body=None,
+    )
+
+    try:
+        res = run_benchmark(args)
+    finally:
+        kill_child_process(process.pid)
+
+    assert res["completed"] == num_prompts
+    return res
+
+
+def run_bench_latency(model, other_args):
+    command = [
+        "python3",
+        "-m",
+        "sglang.bench_latency",
+        "--model-path",
+        model,
+        "--batch-size",
+        "1",
+        "--input",
+        "128",
+        "--output",
+        "8",
+        *other_args,
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    try:
+        stdout, stderr = process.communicate()
+        output = stdout.decode()
+        error = stderr.decode()
+        print(f"Output: {output}", flush=True)
+        print(f"Error: {error}", flush=True)
+
+        lastline = output.split("\n")[-3]
+        output_throughput = float(lastline.split(" ")[-2])
+    finally:
+        kill_child_process(process.pid)
+
+    return output_throughput
+
+
+def lcs(X, Y):
+    m = len(X)
+    n = len(Y)
+    L = [[0] * (n + 1) for _ in range(m + 1)]
+
+    for i in range(m + 1):
+        for j in range(n + 1):
+            if i == 0 or j == 0:
+                L[i][j] = 0
+            elif X[i - 1] == Y[j - 1]:
+                L[i][j] = L[i - 1][j - 1] + 1
+            else:
+                L[i][j] = max(L[i - 1][j], L[i][j - 1])
+
+    return L[m][n]
+
+
+def calculate_rouge_l(output_strs_list1, output_strs_list2):
+    """calculate the ROUGE-L score"""
+    rouge_l_scores = []
+
+    for s1, s2 in zip(output_strs_list1, output_strs_list2):
+        lcs_len = lcs(s1, s2)
+        precision = lcs_len / len(s1) if len(s1) > 0 else 0
+        recall = lcs_len / len(s2) if len(s2) > 0 else 0
+        if precision + recall > 0:
+            fmeasure = (2 * precision * recall) / (precision + recall)
+        else:
+            fmeasure = 0.0
+        rouge_l_scores.append(fmeasure)
+
+    return rouge_l_scores

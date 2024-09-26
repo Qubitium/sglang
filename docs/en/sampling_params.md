@@ -1,5 +1,8 @@
 # Sampling Parameters in SGLang Runtime
 This doc describes the sampling parameters of the SGLang Runtime.
+It is the low-level endpoint of the runtime.
+If you want a high-level endpoint that can automatically handle chat templates, consider using the [OpenAI Compatible API
+](https://github.com/sgl-project/sglang?tab=readme-ov-file#openai-compatible-api).
 
 The `/generate` endpoint accepts the following arguments in the JSON format.
 
@@ -20,6 +23,7 @@ class GenerateReqInput:
     # Whether to return logprobs.
     return_logprob: Optional[Union[List[bool], bool]] = None
     # The start location of the prompt for return_logprob.
+    # By default, this value is "-1", which means it will only return logprobs for output tokens.
     logprob_start_len: Optional[Union[List[int], int]] = None
     # The number of top logprobs to return.
     top_logprobs_num: Optional[Union[List[int], int]] = None
@@ -57,6 +61,9 @@ spaces_between_special_tokens: bool = True,
 regex: Optional[str] = None,
 # Do parallel sampling and return `n` outputs.
 n: int = 1,
+# Constrains the output to follow a given JSON schema.
+# `regex` and `json_schema` cannot be set at the same time.
+json_schema: Optional[str] = None,
 
 ## Penalties. See [Performance Implications on Penalties] section below for more informations.
 
@@ -140,7 +147,7 @@ print("")
 
 Launch a server
 ```
-python3 -m sglang.launch_server --model-path liuhaotian/llava-v1.6-vicuna-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --chat-template vicuna_v1.1 --port 30000
+python3 -m sglang.launch_server --model-path lmms-lab/llava-onevision-qwen2-7b-ov --chat-template chatml-llava
 ```
 
 Download an image
@@ -155,7 +162,9 @@ import requests
 response = requests.post(
     "http://localhost:30000/generate",
     json={
-        "text": "A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions. USER: <image>\nDescribe this picture ASSISTANT:",
+        "text": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                "<|im_start|>user\n<image>\nDescribe this image in a very short sentence.<|im_end|>\n"
+                "<|im_start|>assistant\n",
         "image_data": "example_image.png",
         "sampling_params": {
             "temperature": 0,

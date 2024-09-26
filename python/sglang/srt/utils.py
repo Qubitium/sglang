@@ -26,7 +26,7 @@ import struct
 import time
 from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import psutil
@@ -45,6 +45,7 @@ from typing import (
 from fastapi.responses import JSONResponse
 from packaging import version as pkg_version
 import asyncio
+from torch import nn
 from torch.nn.parameter import Parameter
 from triton.runtime.cache import (
     FileCacheManager,
@@ -57,6 +58,11 @@ logger = logging.getLogger(__name__)
 
 show_time_cost = False
 time_infos = {}
+
+
+# torch flag AMD GPU
+def is_hip() -> bool:
+    return torch.version.hip is not None
 
 
 def enable_show_time_cost():
@@ -195,51 +201,37 @@ def allocate_init_ports(
         cur_port += 1
 
     if port is not None and ret_ports[0] != port:
-        logger.warn(
+        logger.warning(
             f"WARNING: Port {port} is not available. Use port {ret_ports[0]} instead."
         )
 
     return ret_ports[0], ret_ports[1:num_ports_needed]
 
 
-def get_int_token_logit_bias(tokenizer, vocab_size):
-    """Get the logit bias for integer-only tokens."""
-    # a bug when model's vocab size > tokenizer.vocab_size
-    if tokenizer == None:
-        return [-1e5] * vocab_size
-    vocab_size = tokenizer.vocab_size
-    logit_bias = np.zeros(vocab_size, dtype=np.float32)
-    for t_id in range(vocab_size):
-        ss = tokenizer.decode([t_id]).strip()
-        if not (ss.isdigit() or len(ss) == 0 or t_id == tokenizer.eos_token_id):
-            logit_bias[t_id] = -1e5
-
-    return logit_bias
+def is_multimodal_model(model_architectures):
+    if (
+        "LlavaLlamaForCausalLM" in model_architectures
+        or "LlavaQwenForCausalLM" in model_architectures
+        or "LlavaMistralForCausalLM" in model_architectures
+        or "LlavaVidForCausalLM" in model_architectures
+    ):
+        return True
+    else:
+        return False
 
 
-def is_multimodal_model(model):
-    from sglang.srt.model_config import ModelConfig
+def is_generation_model(model_architectures, is_embedding: bool = False):
+    # We have two ways to determine whether a model is a generative model.
+    # 1. Check the model architectue
+    # 2. check the `is_embedding` server args
 
-    if isinstance(model, str):
-        model = model.lower()
-        return "llava" in model or "yi-vl" in model or "llava-next" in model
-
-    if isinstance(model, ModelConfig):
-        model_path = model.path.lower()
-        return (
-                "llava" in model_path or "yi-vl" in model_path or "llava-next" in model_path
-        )
-
-    raise ValueError("unrecognized type")
-
-
-def is_generation_model(model_architectures):
     if (
         "LlamaEmbeddingModel" in model_architectures
         or "MistralModel" in model_architectures
     ):
         return False
-    return True
+    else:
+        return not is_embedding
 
 
 def decode_video_base64(video_base64):
@@ -321,12 +313,14 @@ def decode_video_base64(video_base64):
         )  # Return an empty array and size tuple if no frames were found
 
 
-def load_image(image_file):
+def load_image(image_file: Union[str, bytes]):
     from PIL import Image
 
     image = image_size = None
 
-    if image_file.startswith("http://") or image_file.startswith("https://"):
+    if isinstance(image_file, bytes):
+        image = Image.open(BytesIO(image_file))
+    elif image_file.startswith("http://") or image_file.startswith("https://"):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
         response = requests.get(image_file, timeout=timeout)
         image = Image.open(BytesIO(response.content))
@@ -338,8 +332,10 @@ def load_image(image_file):
     elif image_file.startswith("video:"):
         image_file = image_file.replace("video:", "")
         image, image_size = decode_video_base64(image_file)
-    else:
+    elif isinstance(image_file, str):
         image = Image.open(BytesIO(base64.b64decode(image_file)))
+    else:
+        raise ValueError(f"Invalid image: {image}")
 
     return image, image_size
 
@@ -356,7 +352,7 @@ def suppress_other_loggers():
         logging.WARN
     )
     logging.getLogger("vllm.selector").setLevel(logging.WARN)
-    logging.getLogger("vllm.utils").setLevel(logging.WARN)
+    logging.getLogger("vllm.utils").setLevel(logging.ERROR)
 
 
 T = TypeVar("T")
@@ -494,7 +490,6 @@ def monkey_patch_vllm_dummy_weight_loader():
         model_config: ModelConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
@@ -505,7 +500,6 @@ def monkey_patch_vllm_dummy_weight_loader():
                     model_config,
                     self.load_config,
                     lora_config,
-                    multimodal_config,
                     cache_config,
                 )
 
@@ -513,10 +507,6 @@ def monkey_patch_vllm_dummy_weight_loader():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
                     quant_method.process_weights_after_loading(module)
-                # FIXME: Remove this after Mixtral is updated
-                # to use quant_method.
-                if hasattr(module, "process_weights_after_loading"):
-                    module.process_weights_after_loading()
 
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
@@ -701,59 +691,10 @@ def set_ulimit(target_soft_limit=65535):
         try:
             resource.setrlimit(resource_type, (target_soft_limit, current_hard))
         except ValueError as e:
-            logger.warn(f"Fail to set RLIMIT_NOFILE: {e}")
+            logger.warning(f"Fail to set RLIMIT_NOFILE: {e}")
 
 
-def is_llama3_405b_fp8_head_16(model_config):
-    """Return whether the model is meta-llama/Meta-Llama-3.1-405B-FP8 with 16 kv heads."""
-    if (
-        model_config.hf_config.architectures[0] == "LlamaForCausalLM"
-        and model_config.hf_config.hidden_size == 16384
-        and model_config.hf_config.intermediate_size == 53248
-        and model_config.hf_config.num_hidden_layers == 126
-        and model_config.hf_config.num_key_value_heads == 16
-        and hasattr(model_config.hf_config, "quantization_config")
-        and model_config.hf_config.quantization_config["quant_method"] == "fbgemm_fp8"
-    ):
-        return True
-    return False
-
-
-def monkey_patch_vllm_qvk_linear_loader():
-    """A temporary hack to fix the num_heads for meta-llama/Meta-Llama-3.1-405B-FP8 checkpoints."""
-    from vllm.model_executor.layers.linear import QKVParallelLinear
-
-    origin_weight_loader = QKVParallelLinear.weight_loader
-
-    def get_original_weight(loaded_weight, head_dim):
-        n_kv_head = loaded_weight.shape[0] // (2 * head_dim)
-        dim = loaded_weight.shape[1]
-        for i in range(n_kv_head):
-            loaded_weight[i * head_dim : (i + 1) * head_dim, :] = loaded_weight[
-                2 * i * head_dim : (2 * i + 1) * head_dim, :
-            ]
-        original_kv_weight = loaded_weight[: n_kv_head * head_dim, :]
-        assert original_kv_weight.shape == (n_kv_head * head_dim, dim)
-        return original_kv_weight
-
-    def weight_loader_srt(
-        self,
-        param: Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: Optional[str] = None,
-    ):
-        if (
-            loaded_shard_id in ["k", "v"]
-            and loaded_weight.shape[0] == self.head_size * self.total_num_kv_heads * 2
-        ):
-            loaded_weight = get_original_weight(loaded_weight, self.head_size)
-
-        origin_weight_loader(self, param, loaded_weight, loaded_shard_id)
-
-    setattr(QKVParallelLinear, "weight_loader", weight_loader_srt)
-
-
-def add_api_key_middleware(app, api_key):
+def add_api_key_middleware(app, api_key: str):
     @app.middleware("http")
     async def authentication(request, call_next):
         if request.method == "OPTIONS":
@@ -765,7 +706,7 @@ def add_api_key_middleware(app, api_key):
         return await call_next(request)
 
 
-def prepare_model(model_path):
+def prepare_model(model_path: str):
     if "SGLANG_USE_MODELSCOPE" in os.environ:
         if not os.path.exists(model_path):
             from modelscope import snapshot_download
@@ -774,7 +715,7 @@ def prepare_model(model_path):
     return model_path
 
 
-def prepare_tokenizer(tokenizer_path):
+def prepare_tokenizer(tokenizer_path: str):
     if "SGLANG_USE_MODELSCOPE" in os.environ:
         if not os.path.exists(tokenizer_path):
             from modelscope import snapshot_download
@@ -783,3 +724,44 @@ def prepare_tokenizer(tokenizer_path):
                 tokenizer_path, ignore_patterns=["*.bin", "*.safetensors"]
             )
     return tokenizer_path
+
+
+def configure_logger(server_args, prefix: str = ""):
+    format = f"[%(asctime)s{prefix}] %(message)s"
+    logging.basicConfig(
+        level=getattr(logging, server_args.log_level.upper()),
+        format=format,
+        datefmt="%H:%M:%S",
+        force=True,
+    )
+
+
+# source: https://github.com/vllm-project/vllm/blob/93b38bea5dd03e1b140ca997dfaadef86f8f1855/vllm/lora/utils.py#L9
+def replace_submodule(
+    model: nn.Module, module_name: str, new_module: nn.Module
+) -> nn.Module:
+    """Replace a submodule in a model with a new module."""
+    parent = model.get_submodule(".".join(module_name.split(".")[:-1]))
+    target_name = module_name.split(".")[-1]
+    setattr(parent, target_name, new_module)
+    return new_module
+
+
+def set_weight_attrs(
+    weight: torch.Tensor,
+    weight_attrs: Optional[Dict[str, Any]],
+):
+    """Set attributes on a weight tensor.
+
+    This method is used to set attributes on a weight tensor. This method
+    will not overwrite existing attributes.
+
+    Args:
+        weight: The weight tensor.
+        weight_attrs: A dictionary of attributes to set on the weight tensor.
+    """
+    if weight_attrs is None:
+        return
+    for key, value in weight_attrs.items():
+        assert not hasattr(weight, key), f"Overwriting existing tensor attribute: {key}"
+        setattr(weight, key, value)

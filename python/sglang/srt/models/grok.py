@@ -28,12 +28,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -44,7 +38,13 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from sglang.srt.layers.fused_moe import FusedMoE
 from sglang.srt.layers.layernorm import RMSNorm
+from sglang.srt.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.model_executor.forward_batch_info import InputMetadata
 
@@ -273,9 +273,9 @@ class Grok1Model(nn.Module):
     ) -> torch.Tensor:
         if input_embeds is None:
             hidden_states = self.embed_tokens(input_ids)
+            hidden_states.mul_(self.config.embedding_multiplier_scale)
         else:
             hidden_states = input_embeds
-        hidden_states.mul_(self.config.embedding_multiplier_scale)
 
         for i in range(len(self.layers)):
             hidden_states = self.layers[i](positions, hidden_states, input_metadata)
@@ -284,7 +284,7 @@ class Grok1Model(nn.Module):
         return hidden_states
 
 
-class Grok1ModelForCausalLM(nn.Module):
+class Grok1ForCausalLM(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -295,12 +295,14 @@ class Grok1ModelForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = Grok1Model(config, quant_config=quant_config)
-        # self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        self.lm_head = ReplicatedLinear(config.hidden_size, config.vocab_size)
-        self.logits_processor = LogitsProcessor(config, skip_all_gather=True)
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        self.logits_processor = LogitsProcessor(config)
 
         # Monkey patch _prepare_weights to load pre-sharded weights
         setattr(DefaultModelLoader, "_prepare_weights", _prepare_presharded_weights)
+
+        self.use_presharded_weights = True
+
         warnings.filterwarnings("ignore", category=FutureWarning)
 
     def forward(
@@ -356,6 +358,13 @@ class Grok1ModelForCausalLM(nn.Module):
                         continue
                     name = name.replace(weight_name, param_name)
 
+                    if self.use_presharded_weights:
+                        extra_kwargs = {
+                            "use_presharded_weights": self.use_presharded_weights
+                        }
+                    else:
+                        extra_kwargs = {}
+
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(
@@ -364,7 +373,7 @@ class Grok1ModelForCausalLM(nn.Module):
                         weight_name,
                         shard_id=shard_id,
                         expert_id=expert_id,
-                        pre_sharded=get_tensor_model_parallel_world_size() > 1,
+                        **extra_kwargs,
                     )
                     break
                 else:
@@ -406,4 +415,10 @@ def _prepare_presharded_weights(
     return hf_folder, hf_weights_files, use_safetensors
 
 
-EntryClass = Grok1ModelForCausalLM
+class Grok1ModelForCausalLM(Grok1ForCausalLM):
+    """An alias for backward-compatbility."""
+
+    pass
+
+
+EntryClass = [Grok1ForCausalLM, Grok1ModelForCausalLM]

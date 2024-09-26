@@ -18,11 +18,13 @@ limitations under the License.
 import asyncio
 import concurrent.futures
 import dataclasses
+import json
 import logging
 import multiprocessing as mp
 import os
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
+import fastapi
 import numpy as np
 import transformers
 import uvloop
@@ -49,7 +51,7 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.managers.schedule_batch import FINISH_MATCHED_STR
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling.sampling_params import SamplingParams
-from sglang.srt.server_args import ServerArgs
+from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import is_generation_model, is_multimodal_model, load_image
 from sglang.utils import find_printable_text, get_exception_traceback
 
@@ -86,10 +88,10 @@ class TokenizerManager:
     def __init__(
             self,
             server_args: ServerArgs,
+            port_args: PortArgs,
             router_chan: mp.Queue,
             detokenizer_chan: mp.Queue,
             idle_chan: mp.Queue,
-            model_overide_args: dict = None,
     ):
         # num of pending requests
         self.pending = 0
@@ -99,24 +101,26 @@ class TokenizerManager:
         self.detokenizer_chan = detokenizer_chan
         self.idle_chan = idle_chan
 
+        # Read model args
         self.model_path = server_args.model_path
         self.served_model_name = server_args.served_model_name
         self.hf_config = get_config(
             self.model_path,
             trust_remote_code=server_args.trust_remote_code,
-            model_overide_args=model_overide_args,
+            model_override_args=json.loads(server_args.json_model_override_args),
         )
-        self.is_generation = is_generation_model(self.hf_config.architectures)
+        self.is_generation = is_generation_model(
+            self.hf_config.architectures, self.server_args.is_embedding
+        )
+        self.context_len = server_args.context_length or get_context_length(
+            self.hf_config
+        )
 
-        if server_args.context_length is not None:
-            self.context_len = server_args.context_length
-        else:
-            self.context_len = get_context_length(self.hf_config)
-
+        # Create tokenizer
         if server_args.skip_tokenizer_init:
             self.tokenizer = self.processor = None
         else:
-            if is_multimodal_model(self.model_path):
+            if is_multimodal_model(self.hf_config.architectures):
                 self.processor = get_processor(
                     server_args.tokenizer_path,
                     tokenizer_mode=server_args.tokenizer_mode,
@@ -124,10 +128,14 @@ class TokenizerManager:
                 )
                 self.tokenizer = self.processor.tokenizer
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+                # We want to parallelize the image pre-processing so we
+                # create an executor for it
                 self.executor = concurrent.futures.ProcessPoolExecutor(
                     initializer=init_global_processor,
                     mp_context=mp.get_context("fork"),
                     initargs=(server_args,),
+                    max_workers=os.environ.get("SGLANG_CPU_COUNT", os.cpu_count()),
                 )
             else:
                 self.tokenizer = get_tokenizer(
@@ -136,6 +144,7 @@ class TokenizerManager:
                     trust_remote_code=server_args.trust_remote_code,
                 )
 
+        # Store states
         self.to_create_loop = True
         self.rid_to_state: Dict[str, ReqState] = {}
         self.decoder_task = None
@@ -148,7 +157,7 @@ class TokenizerManager:
             print("tokenizer generate_request decoder loop")
             self.decoder_task = asyncio.create_task(self.decoder_loop())
 
-        # for update model weights
+        # For update model weights
         self.model_update_lock = asyncio.Lock()
         self.model_update_result = None
 
@@ -209,11 +218,15 @@ class TokenizerManager:
                 image_data, aspect_ratio, grid_pinpoints, self.processor
             )
 
-    async def generate_request(self, obj: GenerateReqInput, request=None):
+    async def generate_request(
+        self,
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
+        request: Optional[fastapi.Request] = None,
+    ):
         await self.start()
 
         while self.model_update_lock.locked():
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.001)
 
         obj.post_init()
         is_single = obj.is_single
@@ -226,11 +239,11 @@ class TokenizerManager:
                 yield response
 
     async def _handle_single_request(
-            self,
-            obj: Union[GenerateReqInput, EmbeddingReqInput],
-            request,
-            index=None,
-            is_cache_for_prefill=False,
+        self,
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
+        request: Optional[fastapi.Request] = None,
+        index: Optional[int] = None,
+        is_cache_for_prefill: Optional[bool] = False,
     ):
         if not is_cache_for_prefill:  # The normal case with a single prompt
             not_use_index = index is None
@@ -250,9 +263,10 @@ class TokenizerManager:
             )
 
             if self.is_generation:
-                pixel_values, image_hash, image_size = await self.get_pixel_values(
-                    obj.image_data
+                pixel_values, image_hashes, image_sizes = await self._get_pixel_values(
+                    obj.image_data if not_use_index else obj.image_data[index]
                 )
+                modalities = obj.modalities
                 return_logprob = (
                     obj.return_logprob if not_use_index else obj.return_logprob[index]
                 )
@@ -261,9 +275,6 @@ class TokenizerManager:
                     if not_use_index
                     else obj.logprob_start_len[index]
                 )
-                if return_logprob and logprob_start_len == -1:
-                    logprob_start_len = len(input_ids) - 1
-
                 top_logprobs_num = (
                     obj.top_logprobs_num
                     if not_use_index
@@ -306,28 +317,34 @@ class TokenizerManager:
 
             sampling_params = SamplingParams(**obj.sampling_params[0])
             sampling_params.max_new_tokens = 0
-            pixel_values, image_hash, image_size = await self._get_pixel_values(
+            pixel_values, image_hashes, image_sizes = await self._get_pixel_values(
                 obj.image_data[0]
             )
+            modalities = obj.modalities
             return_logprob = obj.return_logprob[0]
             logprob_start_len = obj.logprob_start_len[0]
             top_logprobs_num = obj.top_logprobs_num[0]
 
+        # Send to the controller
         if self.is_generation:
-            if return_logprob and logprob_start_len == -1:
-                logprob_start_len = len(input_ids) - 1
             tokenized_obj = TokenizedGenerateReqInput(
                 rid,
                 input_text,
                 input_ids,
                 pixel_values,
-                image_hash,
-                image_size,
+                image_hashes,
+                image_sizes,
                 sampling_params,
                 return_logprob,
                 logprob_start_len,
                 top_logprobs_num,
                 obj.stream,
+                modalities,
+                (
+                    obj.lora_path[index]
+                    if isinstance(obj.lora_path, list)
+                    else obj.lora_path
+                ),
             )
         else:  # is embedding
             tokenized_obj = TokenizedEmbeddingReqInput(
@@ -336,11 +353,11 @@ class TokenizerManager:
                 input_ids,
                 sampling_params,
             )
-
         # print("tokenized_obj",tokenized_obj)
         # no need to wait
         asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
 
+        # Recv results
         event = asyncio.Event()
         state = ReqState([], False, event)
         self.rid_to_state[rid] = state
@@ -348,24 +365,24 @@ class TokenizerManager:
         # print(f"single request PENDING {self.pending}")
 
         if not is_cache_for_prefill:
-            async for response in self._wait_for_response(
-                    event, state, obj, rid, request
-            ):
+            async for response in self._wait_for_response(state, obj, rid, request):
                 yield response
         else:
             assert self.is_generation
-            await self._wait_for_cache_prefill_response(event, state, obj, rid, request)
+            await self._wait_for_cache_prefill_response(state, obj, rid, request)
             yield input_ids
 
     async def _handle_batch_request(
-        self, obj: Union[GenerateReqInput, EmbeddingReqInput], request
+        self,
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
+        request: Optional[fastapi.Request] = None,
     ):
         # print(f"tokenizer generate_request multiple request")
         batch_size = obj.batch_size
         if self.is_generation:
             parallel_sample_num = obj.parallel_sample_num
             if parallel_sample_num != 1:
-                # Send prefill requests to cache the common input
+                # Send prefill requests to cache the common prefix
                 parallel_sample_num += 1
                 input_id_result = [] if obj.input_ids is None else None
                 for i in range(batch_size):
@@ -411,24 +428,29 @@ class TokenizerManager:
                 sampling_params = self._get_sampling_params(obj.sampling_params[index])
 
                 if self.is_generation:
-                    if obj.return_logprob[index] and obj.logprob_start_len[index] == -1:
-                        obj.logprob_start_len[index] = len(input_ids) - 1
-                    pixel_values, image_hash, image_size = await self._get_pixel_values(
-                        obj.image_data[index]
+                    pixel_values, image_hashes, image_sizes = (
+                        await self._get_pixel_values(obj.image_data[index])
                     )
+                    modalities = obj.modalities
 
                     tokenized_obj = TokenizedGenerateReqInput(
                         rid,
                         input_text,
                         input_ids,
                         pixel_values,
-                        image_hash,
-                        image_size,
+                        image_hashes,
+                        image_sizes,
                         sampling_params,
                         obj.return_logprob[index],
                         obj.logprob_start_len[index],
                         obj.top_logprobs_num[index],
                         obj.stream,
+                        modalities,
+                        (
+                            obj.lora_path[index]
+                            if isinstance(obj.lora_path, list)
+                            else obj.lora_path
+                        ),
                     )
                 else:
                     tokenized_obj = TokenizedEmbeddingReqInput(
@@ -450,7 +472,6 @@ class TokenizerManager:
 
                 generators.append(
                     self._wait_for_response(
-                        event,
                         state,
                         obj,
                         rid,
@@ -461,17 +482,17 @@ class TokenizerManager:
                 )
 
         # Then process the responses based on streaming option
-
         is_stream = hasattr(obj, "stream") and obj.stream
 
         tasks = [asyncio.create_task(gen.__anext__()) for gen in generators]
-        output_list = []
+        output_list = [None] * len(tasks)
 
+        # Recv results
         while tasks:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
             for task in done:
-                gen_index = tasks.index(task)
+                cur_index = tasks.index(task)
 
                 try:
                     result = task.result()
@@ -479,14 +500,14 @@ class TokenizerManager:
                     if is_stream:
                         yield result
                     else:
-                        output_list.append(result)
+                        output_list[result["index"]] = result
 
-                    tasks[gen_index] = asyncio.create_task(
-                        generators[gen_index].__anext__()
+                    tasks[cur_index] = asyncio.create_task(
+                        generators[cur_index].__anext__()
                     )
                 except StopAsyncIteration:
-                    del generators[gen_index]
-                    del tasks[gen_index]
+                    del generators[cur_index]
+                    del tasks[cur_index]
 
         if not is_stream:
             yield output_list
@@ -505,28 +526,19 @@ class TokenizerManager:
             sampling_params.verify()
         return sampling_params
 
-    async def _get_pixel_values(self, image_data):
-        if isinstance(image_data, list) and len(image_data) > 0:
-            return await self.get_pixel_values(image_data[0])
-        elif isinstance(image_data, str):
-            return await self.get_pixel_values(image_data)
-        else:
-            return None, None, None
-
     async def _wait_for_response(
         self,
-        event: asyncio.Event,
         state: ReqState,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
         rid: str,
-        request,
-        index: int = None,
+        request: Optional[fastapi.Request] = None,
+        index: Optional[int] = None,
         response_index: int = 0,
     ):
         # print(f"tokenizer _wait_for_response for event rid: {rid}")
         while True:
             try:
-                await asyncio.wait_for(event.wait(), timeout=4)
+                await asyncio.wait_for(state.event.wait(), timeout=4)
             except asyncio.TimeoutError:
                 if request is not None and await request.is_disconnected():
                     for rid in [obj.rid] if obj.is_single else obj.rid:
@@ -572,16 +584,15 @@ class TokenizerManager:
 
                 break
 
-            event.clear()
+            state.event.clear()
             yield out
 
     async def _wait_for_cache_prefill_response(
-            self,
-            event: asyncio.Event,
-            state: ReqState,
-            obj: GenerateReqInput,
-            rid: str,
-            request,
+        self,
+        state: ReqState,
+        obj: GenerateReqInput,
+        rid: str,
+        request: Optional[fastapi.Request] = None,
     ):
         # print(f"tokenizer _wait_for_prefill_response for event rid: {rid}")
         while True:
@@ -607,34 +618,9 @@ class TokenizerManager:
 
         del self.rid_to_state[rid]
 
-    async def flush_cache(self):
-        flush_cache_req = FlushCacheReq()
-        # self.send_to_router.send_pyobj(flush_cache_req)
-        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, flush_cache_req)
-
-    async def update_weights(self, obj: UpdateWeightReqInput, request):
-        if self.to_create_loop:
-            self.create_handle_loop()
-
-        # default the load format to the server_args
-        if obj.load_format is None:
-            obj.load_format = self.server_args.load_format
-
-        if not self.model_update_lock.locked():
-            async with self.model_update_lock:
-                # wait for the previous generation requests to finish
-                while len(self.rid_to_state) > 0:
-                    await asyncio.sleep(0)
-                self.send_to_router.send_pyobj(obj)
-                self.model_update_result = asyncio.Future()
-                result = await self.model_update_result
-                if result.success:
-                    self.server_args.model_path = obj.model_path
-                    self.server_args.load_format = obj.load_format
-                    self.model_path = obj.model_path
-            return result.success, result.message
-        else:
-            return False, "Another update is in progress. Please try again later."
+    def flush_cache(self):
+        req = FlushCacheReq()
+        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, req)
 
     def abort_request(self, rid: str):
         if rid not in self.rid_to_state:
@@ -648,6 +634,32 @@ class TokenizerManager:
         self.pending = 0
         # print("Abort request, signal to IDLE Chan!")
         asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
+
+    async def update_weights(
+        self, obj: UpdateWeightReqInput, request: Optional[fastapi.Request] = None
+    ):
+        if self.to_create_loop:
+            self.create_handle_loop()
+
+        # default the load format to the server_args
+        if obj.load_format is None:
+            obj.load_format = self.server_args.load_format
+
+        if not self.model_update_lock.locked():
+            async with self.model_update_lock:
+                # wait for the previous generation requests to finish
+                while len(self.rid_to_state) > 0:
+                    await asyncio.sleep(0)
+                self.send_to_controller.send_pyobj(obj)
+                self.model_update_result = asyncio.Future()
+                result = await self.model_update_result
+                if result.success:
+                    self.server_args.model_path = obj.model_path
+                    self.server_args.load_format = obj.load_format
+                    self.model_path = obj.model_path
+            return result.success, result.message
+        else:
+            return False, "Another update is in progress. Please try again later."
 
     def create_abort_task(self, obj: GenerateReqInput):
         # Abort the request if the client is disconnected.
@@ -866,11 +878,75 @@ class TokenizerManager:
                 )
         return top_logprobs
 
+    async def _get_pixel_values(self, image_data: List[Union[str, bytes]]):
+        if not image_data:
+            return None, None, None
+
+        aspect_ratio = getattr(self.hf_config, "image_aspect_ratio", None)
+        grid_pinpoints = (
+            self.hf_config.image_grid_pinpoints
+            if hasattr(self.hf_config, "image_grid_pinpoints")
+            and "anyres" in aspect_ratio
+            else None
+        )
+
+        if isinstance(image_data, list) and len(image_data) > 0:
+            # Multiple images
+            if len(image_data) > 1:
+                aspect_ratio = "pad"  # LLaVA OneVision Handling: more than one image --> interleaved image mode or video mode. We do not use anyres
+                pixel_values, image_hashes, image_sizes = [], [], []
+                for img_data in image_data:
+                    pixel_v, image_h, image_s = await self._process_single_image(
+                        img_data, aspect_ratio, grid_pinpoints
+                    )
+                    pixel_values.append(pixel_v)
+                    image_hashes.append(image_h)
+                    image_sizes.append(image_s)
+
+                if isinstance(pixel_values[0], np.ndarray):
+                    pixel_values = np.stack(pixel_values, axis=0)
+            else:
+                # A single image
+                pixel_values, image_hash, image_size = await self._process_single_image(
+                    image_data[0], aspect_ratio, grid_pinpoints
+                )
+                image_hashes = [image_hash]
+                image_sizes = [image_size]
+        elif isinstance(image_data, str):
+            # A single image
+            pixel_values, image_hash, image_size = await self._process_single_image(
+                image_data, aspect_ratio, grid_pinpoints
+            )
+            image_hashes = [image_hash]
+            image_sizes = [image_size]
+        else:
+            raise ValueError(f"Invalid image data: {image_data}")
+
+        return pixel_values, image_hashes, image_sizes
+
+    async def _process_single_image(
+        self, image_data: Union[bytes, str], aspect_ratio: str, grid_pinpoints: str
+    ):
+        if self.executor is not None:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.executor,
+                _process_single_image_task,
+                image_data,
+                aspect_ratio,
+                grid_pinpoints,
+            )
+        else:
+            return _process_single_image_task(
+                image_data, aspect_ratio, grid_pinpoints, self.processor
+            )
+
 
 global global_processor
 
 
 def init_global_processor(server_args: ServerArgs):
+    """Init the global processor for multi modal models."""
     global global_processor
     transformers.logging.set_verbosity_error()
     global_processor = get_processor(
@@ -880,13 +956,17 @@ def init_global_processor(server_args: ServerArgs):
     )
 
 
-def get_pixel_values(
-        image_data, image_aspect_ratio=None, image_grid_pinpoints=None, processor=None
+def _process_single_image_task(
+    image_data: Union[str, bytes],
+    image_aspect_ratio: Optional[str] = None,
+    image_grid_pinpoints: Optional[str] = None,
+    processor=None,
 ):
     try:
         processor = processor or global_processor
         image, image_size = load_image(image_data)
         if image_size is not None:
+            # It is a video with multiple images
             image_hash = hash(image_data)
             pixel_values = processor.image_processor(image)["pixel_values"]
             for _ in range(len(pixel_values)):
@@ -894,20 +974,28 @@ def get_pixel_values(
             pixel_values = np.stack(pixel_values, axis=0)
             return pixel_values, image_hash, image_size
         else:
+            # It is an image
             image_hash = hash(image_data)
             if image_aspect_ratio == "pad":
                 image = expand2square(
                     image,
                     tuple(int(x * 255) for x in processor.image_processor.image_mean),
                 )
-                pixel_values = processor.image_processor(image)["pixel_values"][0]
-            elif image_aspect_ratio == "anyres" or "anyres_max" in image_aspect_ratio:
+                pixel_values = processor.image_processor(image.convert("RGB"))[
+                    "pixel_values"
+                ][0]
+            elif image_aspect_ratio == "anyres" or (
+                image_aspect_ratio is not None and "anyres_max" in image_aspect_ratio
+            ):
                 pixel_values = process_anyres_image(
                     image, processor.image_processor, image_grid_pinpoints
                 )
             else:
                 pixel_values = processor.image_processor(image)["pixel_values"][0]
-            pixel_values = pixel_values.astype(np.float16)
+
+            if isinstance(pixel_values, np.ndarray):
+                pixel_values = pixel_values.astype(np.float16)
+
             return pixel_values, image_hash, image.size
     except Exception:
-        print("Exception in TokenizerManager:\n" + get_exception_traceback())
+        logger.error("Exception in TokenizerManager:\n" + get_exception_traceback())

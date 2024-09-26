@@ -9,7 +9,7 @@ import uuid
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional
 
 import tqdm
 
@@ -434,9 +434,6 @@ class StreamExecutor:
         self.cur_images.append((path, base64_data))
         self.text_ += self.chat_template.image_token
 
-        # if global_config.eager_fill_image:
-        #     self.backend.fill_image(self)
-
     def _spec_gen(self, sampling_params):
         stop = sampling_params.stop
         max_new_tokens = sampling_params.max_new_tokens
@@ -674,6 +671,7 @@ class StreamExecutor:
             "return_text_in_logprobs",
             "dtype",
             "regex",
+            "json_schema",
         ]:
             value = getattr(sampling_params, item, None)
             if value is not None:
@@ -855,6 +853,8 @@ class ProgramState:
         return self.stream_executor.get_meta_info(name)
 
     def __iadd__(self, other):
+        if other is None:
+            raise ValueError("Tried to append None to state.")
         self.stream_executor.submit(other)
         return self
 

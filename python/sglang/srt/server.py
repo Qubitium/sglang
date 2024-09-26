@@ -40,6 +40,7 @@ import requests
 import uvicorn
 import uvloop
 from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
@@ -62,6 +63,7 @@ from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api.adapter import (
     load_chat_template_for_openai_api,
     v1_batches,
+    v1_cancel_batch,
     v1_chat_completions,
     v1_completions,
     v1_delete_file,
@@ -77,7 +79,9 @@ from sglang.srt.utils import (
     add_api_key_middleware,
     allocate_init_ports,
     assert_pkg_version,
+    configure_logger,
     enable_show_time_cost,
+    is_hip,
     kill_child_process,
     maybe_set_triton_cache_manager,
     prepare_model,
@@ -113,8 +117,14 @@ API_KEY_HEADER_NAME = "X-API-Key"
 app = FastAPI()
 tokenizer_manager = None
 
-# Put some args for easily access
-global_server_args_dict = {}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/health")
 async def health() -> Response:
@@ -165,7 +175,7 @@ async def flush_cache():
 async def update_weights(obj: UpdateWeightReqInput, request: Request):
 
     success, message = await tokenizer_manager.update_weights(obj, request)
-    content = {"message": message, "success": str(success)}
+    content = {"success": success, "message": message}
     if success:
         return JSONResponse(
             content,
@@ -269,6 +279,12 @@ async def openai_v1_batches(raw_request: Request):
     return await v1_batches(tokenizer_manager, raw_request)
 
 
+@app.post("/v1/batches/{batch_id}/cancel")
+async def cancel_batches(batch_id: str):
+    # https://platform.openai.com/docs/api-reference/batch/cancel
+    return await v1_cancel_batch(tokenizer_manager, batch_id)
+
+
 @app.get("/v1/batches/{batch_id}")
 async def retrieve_batch(batch_id: str):
     return await v1_retrieve_batch(batch_id)
@@ -289,7 +305,6 @@ async def retrieve_file_content(file_id: str):
 def launch_server(
     server_args: ServerArgs,
     tokenizer_init_chan=None,
-    model_overide_args: Optional[dict] = None,
     pipe_finish_writer: Optional[mp.connection.Connection] = None,
 ):
     """Launch an HTTP server."""
@@ -297,15 +312,12 @@ def launch_server(
 
     global tokenizer_manager
 
-    logging.basicConfig(
-        level=getattr(logging, server_args.log_level.upper()),
-        format="%(message)s",
-    )
+    configure_logger(server_args)
 
     server_args.check_server_args()
     _set_envs_and_config(server_args)
 
-    # Allocate ports
+    # Allocate ports for inter-process communications
     server_args.port, server_args.additional_ports = allocate_init_ports(
         server_args.port,
         server_args.additional_ports,
@@ -344,7 +356,6 @@ def launch_server(
             tp_rank_range,
             server_args,
             ports[3],
-            model_overide_args,
         )
 
         try:
@@ -355,41 +366,40 @@ def launch_server(
             return
 
     # Launch processes
-    tokenizer_manager = TokenizerManager(server_args, router_chan, detokenizer_chan, idle_chan, model_overide_args)
+    if server_args.dp_size == 1:
+        start_controller_process = start_controller_process_single
+    else:
+        start_controller_process = start_controller_process_multi
+    proc_controller = mp.Process(
+        target=start_controller_process,
+        args=(
+            server_args,
+            port_args,
+            router_chan,
+            detokenizer_chan,
+            idle_chan,
+            startup_chan,
+        ),
+    )
+    proc_controller.start()
+
+    tokenizer_manager = TokenizerManager(server_args, port_args, router_chan, detokenizer_chan, idle_chan)
     if server_args.chat_template:
         load_chat_template_for_openai_api(tokenizer_manager, server_args.chat_template)
 
     if tokenizer_init_chan:
         tokenizer_init_chan.put_nowait("init ok")
 
-    if server_args.dp_size == 1:
-        start_process = start_controller_process_single
-    else:
-        start_process = start_controller_process_multi
-    proc_router = mp.Process(
-        args=(
-            server_args,
-            port_args,
-            model_overide_args,
-            router_chan,
-            detokenizer_chan,
-            idle_chan,
-            startup_chan,
-        ),
-        target=start_process,
-    )
-    proc_router.start()
-
     # Wait for the model to finish loading
     router_init_state = startup_chan.get()
 
     if router_init_state != "init ok":
-        proc_router.kill()
+        proc_controller.kill()
         raise RuntimeError(
             "Initialization failed. "
             f"controller_init_state: {router_init_state}"
         )
-    assert proc_router.is_alive()
+    assert proc_controller.is_alive()
 
     # Add api key authorization
     if server_args.api_key:
@@ -440,14 +450,18 @@ def _set_envs_and_config(server_args: ServerArgs):
         maybe_set_triton_cache_manager()
 
     # Check flashinfer version
-    if not server_args.disable_flashinfer:
+    if server_args.attention_backend == "flashinfer":
         assert_pkg_version(
             "flashinfer",
-            "0.1.5",
+            "0.1.6",
             "Please uninstall the old version and "
             "reinstall the latest version by following the instructions "
             "at https://docs.flashinfer.ai/installation.html.",
         )
+
+    if is_hip():
+        # to figure out a better method of not using fork later
+        mp.set_start_method("spawn", force=True)
 
 
 def _wait_and_warmup(server_args, pipe_finish_writer, pid):
@@ -462,13 +476,12 @@ def _wait_and_warmup(server_args, pipe_finish_writer, pid):
         time.sleep(1)
         try:
             res = requests.get(url + "/get_model_info", timeout=5, headers=headers)
-            assert res.status_code == 200, f"{res}"
+            assert res.status_code == 200, f"{res=}, {res.text=}"
             success = True
             break
-        except (AssertionError, requests.exceptions.RequestException) as e:
+        except (AssertionError, requests.exceptions.RequestException):
             last_traceback = get_exception_traceback()
             pass
-    model_info = res.json()
 
     if not success:
         if pipe_finish_writer is not None:
@@ -476,6 +489,8 @@ def _wait_and_warmup(server_args, pipe_finish_writer, pid):
         logger.error(f"Initialization failed. warmup error: {last_traceback}")
         kill_child_process(pid, including_parent=False)
         return
+
+    model_info = res.json()
 
     # Send a warmup request
     request_name = "/generate" if model_info["is_generation"] else "/encode"
@@ -524,7 +539,6 @@ class Runtime:
         self,
         tokenizer_init_chan: mp.Queue = None,
         log_level: str = "error",
-        model_overide_args: Optional[dict] = None,
         *args,
         **kwargs,
     ):
@@ -545,9 +559,10 @@ class Runtime:
 
         # self.pid = None
         # pipe_reader, pipe_writer = mp.Pipe(duplex=False)
+        #
         # proc = mp.Process(
         #     target=launch_server,
-        #     args=(self.server_args, model_overide_args, pipe_writer),
+        #     args=(self.server_args, pipe_writer),
         # )
         # proc.start()
         # pipe_writer.close()
@@ -555,7 +570,7 @@ class Runtime:
 
         self.pid = os.getpid()
 
-        threading.Thread(target=launch_server, args=[self.server_args, tokenizer_init_chan, model_overide_args, None,], daemon=True).start()
+        threading.Thread(target=launch_server, args=[self.server_args, tokenizer_init_chan, None,], daemon=True).start()
 
         # try:
         #     init_state = pipe_reader.recv()
@@ -633,11 +648,12 @@ class Runtime:
 
     def generate(
         self,
-        prompt: str,
+        prompt: Union[str, List[str]],
         sampling_params: Optional[Dict] = None,
         return_logprob: Optional[Union[List[bool], bool]] = False,
         logprob_start_len: Optional[Union[List[int], int]] = None,
         top_logprobs_num: Optional[Union[List[int], int]] = None,
+        lora_path: Optional[List[Optional[str]]] = None,
     ):
         json_data = {
             "text": prompt,
@@ -645,7 +661,9 @@ class Runtime:
             "return_logprob": return_logprob,
             "logprob_start_len": logprob_start_len,
             "top_logprobs_num": top_logprobs_num,
+            "lora_path": lora_path,
         }
+        assert not isinstance(lora_path, list) or len(lora_path) == len(prompt)
         response = requests.post(
             self.url + "/generate",
             json=json_data,
@@ -654,7 +672,7 @@ class Runtime:
 
     def encode(
         self,
-        prompt: str,
+        prompt: Union[str, List[str]],
     ):
         json_data = {
             "text": prompt,

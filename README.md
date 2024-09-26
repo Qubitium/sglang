@@ -11,23 +11,26 @@
 
 --------------------------------------------------------------------------------
 
-| [**Blog**](https://lmsys.org/blog/2024-07-25-sglang-llama3/) | [**Paper**](https://arxiv.org/abs/2312.07104) | [**Slack**](https://join.slack.com/t/sgl-fru7574/shared_invite/zt-2ngly9muu-t37XiH87qvD~6rVBTkTEHw) |
+| [**Blog**](https://lmsys.org/blog/2024-07-25-sglang-llama3/) | [**Paper**](https://arxiv.org/abs/2312.07104) | [**Join Slack**](https://join.slack.com/t/sgl-fru7574/shared_invite/zt-2ngly9muu-t37XiH87qvD~6rVBTkTEHw) | [**Join Weekly Development Meeting**](https://calendar.app.google/v2Tw3kuHkKYyp8VV7) |
 
 SGLang is a fast serving framework for large language models and vision language models.
 It makes your interaction with models faster and more controllable by co-designing the backend runtime and frontend language.
-
 The core features include:
-- **Fast Backend Runtime**: Efficient serving with RadixAttention for prefix caching, jump-forward constrained decoding, continuous batching, token attention (paged attention), tensor parallelism, flashinfer kernels, and quantization (AWQ/FP8/GPTQ/Marlin).
-- **Flexible Frontend Language**: Enables easy programming of LLM applications with chained generation calls, advanced prompting, control flow, multiple modalities, parallelism, and external interactions.
+
+- **Fast Backend Runtime**: Provides efficient serving with RadixAttention for prefix caching, jump-forward constrained decoding, continuous batching, token attention (paged attention), tensor parallelism, FlashInfer kernels, chunked prefill, and quantization (INT4/FP8/AWQ/GPTQ).
+- **Flexible Frontend Language**: Offers an intuitive interface for programming LLM applications, including chained generation calls, advanced prompting, control flow, multi-modal inputs, parallelism, and external interactions.
+- **Extensive Model Support**: Supports a wide range of generative models (Llama 3, Gemma 2, Mistral, QWen, DeepSeek, LLaVA, etc.) and embedding models (e5-mistral), with easy extensibility for integrating new models.
+- **Active Community**: SGLang is open-source and backed by an active community with industry adoption.
 
 ## News
+- [2024/09] 🔥 SGLang v0.3 Release: 7x Faster DeepSeek MLA, 1.5x Faster torch.compile, Multi-Image/Video LLaVA-OneVision ([blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/)).
 - [2024/07] 🔥 Faster Llama3 Serving with SGLang Runtime (vs. TensorRT-LLM, vLLM) ([blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/)).
-- [2024/04] SGLang is used by the official **LLaVA-NeXT (video)** release ([blog](https://llava-vl.github.io/blog/2024-04-30-llava-next-video/)).
 - [2024/02] SGLang enables **3x faster JSON decoding** with compressed finite state machine ([blog](https://lmsys.org/blog/2024-02-05-compressed-fsm/)).
 
 <details>
 <summary>More</summary>
 
+- [2024/04] SGLang is used by the official **LLaVA-NeXT (video)** release ([blog](https://llava-vl.github.io/blog/2024-04-30-llava-next-video/)).
 - [2024/01] SGLang provides up to **5x faster inference** with RadixAttention ([blog](https://lmsys.org/blog/2024-01-17-sglang/)).
 - [2024/01] SGLang powers the serving of the official **LLaVA v1.6** release demo ([usage](https://github.com/haotian-liu/LLaVA?tab=readme-ov-file#demo)).
 
@@ -43,6 +46,8 @@ The core features include:
 
 ## Install
 
+You can install SGLang using any of the methods below.
+
 ### Method 1: With pip
 ```
 pip install --upgrade pip
@@ -55,7 +60,7 @@ pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
 ### Method 2: From source
 ```
 # Use the last release branch
-git clone -b v0.2.13 https://github.com/sgl-project/sglang.git
+git clone -b v0.3.1.post3 https://github.com/sgl-project/sglang.git
 cd sglang
 
 pip install --upgrade pip
@@ -66,7 +71,7 @@ pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
 ```
 
 ### Method 3: Using docker
-The docker images are available on Docker Hub as [lmsysorg/sglang](https://hub.docker.com/r/lmsysorg/sglang/tags), built from [Dockerfile](docker).
+The docker images are available on Docker Hub as [lmsysorg/sglang](https://hub.docker.com/r/lmsysorg/sglang/tags), built from [Dockerfile](https://github.com/sgl-project/sglang/tree/main/docker).
 Replace `<secret>` below with your huggingface hub [token](https://huggingface.co/docs/hub/en/security-tokens).
 
 ```bash
@@ -82,17 +87,19 @@ docker run --gpus all \
 ### Method 4: Using docker compose
 
 <details>
+<summary>More</summary>
 
 > This method is recommended if you plan to serve it as a service.
-> A better approach is to use the [k8s-sglang-service.yaml](./docker/k8s-sglang-service.yaml).
+> A better approach is to use the [k8s-sglang-service.yaml](docker/k8s-sglang-service.yaml).
 
-1. Copy the [compose.yml](./docker/compose.yaml) to your local machine
+1. Copy the [compose.yml](docker/compose.yaml) to your local machine
 2. Execute the command `docker compose up -d` in your terminal.
 </details>
 
 ### Method 5: Run on Kubernetes or Clouds with SkyPilot
 
 <details>
+<summary>More</summary>
 
 To deploy on Kubernetes or 12+ clouds, you can use [SkyPilot](https://github.com/skypilot-org/skypilot).
 
@@ -132,7 +139,7 @@ sky status --endpoint 30000 sglang
 
 
 ### Common Notes
-- [FlashInfer](https://github.com/flashinfer-ai/flashinfer) is currently one of the dependencies that must be installed for SGLang. If you are using NVIDIA GPU devices below sm80, such as T4, you can't use SGLang for the time being. We expect to resolve this issue soon, so please stay tuned. If you encounter any FlashInfer-related issues on sm80+ devices (e.g., A100, L40S, H100), consider using Triton's kernel by `--disable-flashinfer --disable-flashinfer-sampling` and raise a issue.
+- [FlashInfer](https://github.com/flashinfer-ai/flashinfer) is the default attention kernel backend. It only supports sm75 and above. If you encounter any FlashInfer-related issues on sm75+ devices (e.g., T4, A10, A100, L4, L40S, H100), please switch to other kernels by adding `--attention-backend triton --sampling-backend pytorch` and open an issue on GitHub.
 - If you only need to use the OpenAI backend, you can avoid installing other dependencies by using `pip install "sglang[openai]"`.
 
 ## Backend: SGLang Runtime (SRT)
@@ -186,29 +193,40 @@ response = client.chat.completions.create(
     max_tokens=64,
 )
 print(response)
+
+# Text embedding
+response = client.embeddings.create(
+    model="default",
+    input="How are you today",
+)
+print(response)
 ```
 
 It supports streaming, vision, and most features of the Chat/Completions/Models/Batch endpoints specified by the [OpenAI API Reference](https://platform.openai.com/docs/api-reference/).
 
 ### Additional Server Arguments
-- Add `--tp 2` to enable multi-GPU tensor parallelism. If it reports the error "peer access is not supported between these two devices", add `--enable-p2p-check` to the server launch command.
+- To enable multi-GPU tensor parallelism, add `--tp 2`. If it reports the error "peer access is not supported between these two devices", add `--enable-p2p-check` to the server launch command.
 ```
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000 --tp 2
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --tp 2
 ```
-- Add `--dp 2` to enable multi-GPU data parallelism. It can also be used together with tensor parallelism. Data parallelism is better for throughput if there is enough memory.
+- To enable multi-GPU data parallelism, add `--dp 2`. Data parallelism is better for throughput if there is enough memory. It can also be used together with tensor parallelism. The following command uses 4 GPUs in total.
 ```
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000 --dp 2 --tp 2
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --dp 2 --tp 2
 ```
 - If you see out-of-memory errors during serving, try to reduce the memory usage of the KV cache pool by setting a smaller value of `--mem-fraction-static`. The default value is `0.9`.
 ```
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000 --mem-fraction-static 0.7
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --mem-fraction-static 0.7
 ```
 - See [hyperparameter_tuning.md](docs/en/hyperparameter_tuning.md) on tuning hyperparameters for better performance.
 - If you see out-of-memory errors during prefill for long prompts, try to set a smaller chunked prefill size.
 ```
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000 --chunked-prefill-size 4096
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --chunked-prefill-size 4096
 ```
-- Add `--nnodes 2` to run tensor parallelism on multiple nodes. If you have two nodes with two GPUs on each node and want to run TP=4, let `sgl-dev-0` be the hostname of the first node and `50000` be an available port.
+- To enable torch.compile acceleration, add `--enable-torch-compile`. It accelerates small models on small batch sizes.
+- To enable fp8 weight quantization, add `--quantization fp8` on a fp16 checkpoint or directly load a fp8 checkpoint without specifying any arguments.
+- To enable fp8 kv cache quantization, add `--kv-cache-dtype fp8_e5m2`.
+- If the model does not have a chat template in the Hugging Face tokenizer, you can specify a [custom chat template](docs/en/custom_chat_template.md).
+- To run tensor parallelism on multiple nodes, add `--nnodes 2`. If you have two nodes with two GPUs on each node and want to run TP=4, let `sgl-dev-0` be the hostname of the first node and `50000` be an available port.
 ```
 # Node 0
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --tp 4 --nccl-init sgl-dev-0:50000 --nnodes 2 --node-rank 0
@@ -216,68 +234,83 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 # Node 1
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --tp 4 --nccl-init sgl-dev-0:50000 --nnodes 2 --node-rank 1
 ```
-- If the model does not have a template in the Hugging Face tokenizer, you can specify a [custom chat template](docs/en/custom_chat_template.md).
-- To enable experimental torch.compile support, you can add `--enable-torch-compile`. It accelerates small models on small batch sizes.
-- To enable fp8 quantization, you can add `--quantization fp8` on a fp16 checkpoint or directly load a fp8 checkpoint without specifying any arguments.
  
 ### Supported Models
 
+**Generative Models**
 - Llama / Llama 2 / Llama 3 / Llama 3.1
 - Mistral / Mixtral / Mistral NeMo
 - Gemma / Gemma 2
+- OLMoE
 - Qwen / Qwen 2 / Qwen 2 MoE
 - DeepSeek / DeepSeek 2
-- LLaVA 1.5 / 1.6
-  - `python -m sglang.launch_server --model-path liuhaotian/llava-v1.5-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --chat-template vicuna_v1.1 --port 30000`
-  - `python -m sglang.launch_server --model-path liuhaotian/llava-v1.6-vicuna-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --chat-template vicuna_v1.1 --port 30000`
-  - `python -m sglang.launch_server --model-path liuhaotian/llava-v1.6-34b --tokenizer-path liuhaotian/llava-v1.6-34b-tokenizer --port 30000`
-  - `python -m sglang.launch_server --model-path lmms-lab/llama3-llava-next-8b --port=30000 --host=127.0.0.1 --tp-size=1 --chat-template=llava_llama_3`
-  - `python -m sglang.launch_server --model-path lmms-lab/llava-next-72b --port=30000 --host="127.0.0.1" --tp-size=8 --chat-template=chatml-llava`
-- LLaVA-NeXT-Video
-  - see [examples/usage/llava_video](examples/usage/llava_video)
-- [LLaVA-OneVision](https://arxiv.org/abs/2408.03326)
-  - `python3 -m sglang.launch_server --model-path lmms-lab/llava-onevision-qwen2-72b-ov --port=30000 --host=127.0.0.1 --tp-size=8 --chat-template=chatml-llava --chunked-prefill-size=16384`
-  - see [test/srt/test_llava_onevision_openai_server.py](test/srt/test_llava_onevision_openai_server.py)
+- [LLaVA-OneVision](https://llava-vl.github.io/blog/2024-08-05-llava-onevision/)
+  - `python3 -m sglang.launch_server --model-path lmms-lab/llava-onevision-qwen2-7b-ov --port=30000 --chat-template=chatml-llava`
+  - `python3 -m sglang.launch_server --model-path lmms-lab/llava-onevision-qwen2-72b-ov --port=30000 --tp-size=8 --chat-template=chatml-llava`
+  - Query the server with the [OpenAI Vision API](https://platform.openai.com/docs/guides/vision). See examples at [test/srt/test_vision_openai_server.py](test/srt/test_vision_openai_server.py)
+- LLaVA 1.5 / 1.6 / NeXT
+  - `python -m sglang.launch_server --model-path lmms-lab/llama3-llava-next-8b --port=30000 --tp-size=1 --chat-template=llava_llama_3`
+  - `python -m sglang.launch_server --model-path lmms-lab/llava-next-72b --port=30000 --tp-size=8 --chat-template=chatml-llava`
+  - Query the server with the [OpenAI Vision API](https://platform.openai.com/docs/guides/vision). See examples at [test/srt/test_vision_openai_server.py](test/srt/test_vision_openai_server.py)
 - Yi-VL
-  - see [srt_example_yi_vl.py](examples/quick_start/srt_example_yi_vl.py).
 - StableLM
 - Command-R
 - DBRX
 - Grok
 - ChatGLM
 - InternLM 2
+- Exaone 3
+- BaiChuan2
+- MiniCPM / MiniCPM 3
+- XVERSE / XVERSE MoE
 
-Instructions for supporting a new model are [here](https://github.com/sgl-project/sglang/blob/main/docs/en/model_support.md).
+
+**Embedding Models**
+
+- e5-mistral
+- gte-Qwen2
+  - `python -m sglang.launch_server --model-path Alibaba-NLP/gte-Qwen2-7B-instruct --is-embedding`
+
+Instructions for supporting a new model are [here](docs/en/model_support.md).
 
 #### Use Models From ModelScope
-To use model from [ModelScope](https://www.modelscope.cn), setting environment variable SGLANG_USE_MODELSCOPE.
+<details>
+<summary>More</summary>
+
+To use a model from [ModelScope](https://www.modelscope.cn), set the environment variable SGLANG_USE_MODELSCOPE.
 ```
 export SGLANG_USE_MODELSCOPE=true
 ```
 Launch [Qwen2-7B-Instruct](https://www.modelscope.cn/models/qwen/qwen2-7b-instruct) Server
 ```
 SGLANG_USE_MODELSCOPE=true python -m sglang.launch_server --model-path qwen/Qwen2-7B-Instruct --port 30000
-```    
+```
+  
+</details>
 
 #### Run Llama 3.1 405B
+<details>
+<summary>More</summary>
 
 ```bash
-## Run 405B (fp8) on a single node
+# Run 405B (fp8) on a single node
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-405B-Instruct-FP8 --tp 8
 
-## Run 405B (fp16) on two nodes
-# replace the `172.16.4.52:20000` with your own first node ip address and port, disable CUDA Graph temporarily
+# Run 405B (fp16) on two nodes
+## on the first node, replace the `172.16.4.52:20000` with your own first node ip address and port
+GLOO_SOCKET_IFNAME=eth0 python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-405B-Instruct --tp 16 --nccl-init-addr 172.16.4.52:20000 --nnodes 2 --node-rank 0 --disable-cuda-graph
 
-# on the first node
-GLOO_SOCKET_IFNAME=eth0 python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-405B-Instruct --tp 16 --nccl-init-addr 172.16.4.52:20000 --nnodes 2 --node-rank 0 --disable-cuda-graph --mem-frac 0.75
-
-# on the second
-GLOO_SOCKET_IFNAME=eth0 python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-405B-Instruct --tp 16 --nccl-init-addr 172.16.4.52:20000 --nnodes 2 --node-rank 1 --disable-cuda-graph --mem-frac 0.75
+## on the first node, replace the `172.16.4.52:20000` with your own first node ip address and port
+GLOO_SOCKET_IFNAME=eth0 python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-405B-Instruct --tp 16 --nccl-init-addr 172.16.4.52:20000 --nnodes 2 --node-rank 1 --disable-cuda-graph
 ```
+
+</details>
 
 ### Benchmark Performance
 
-- Benchmark a single static batch by running the following command without launching a server. The arguments are the same as for `launch_server.py`. Note that this is not a dynamic batching server, so it may run out of memory for a batch size that a real server can handle. A real server truncates the prefill into several batches, while this unit test does not. For accurate large batch testing, consider using `sglang.bench_serving`.
+- Benchmark a single static batch by running the following command without launching a server. The arguments are the same as for `launch_server.py`.
+  Note that this is not a dynamic batching server, so it may run out of memory for a batch size that a real server can handle.
+  A real server truncates the prefill into several batches, while this unit test does not. For accurate large batch testing, please use `sglang.bench_serving` instead.
   ```
   python -m sglang.bench_latency --model-path meta-llama/Meta-Llama-3-8B-Instruct --batch 32 --input-len 256 --output-len 32
   ```
@@ -358,7 +391,7 @@ print(state["answer_1"])
 #### More Examples
 
 Anthropic and VertexAI (Gemini) models are also supported.
-You can find more examples at [examples/quick_start](examples/quick_start).
+You can find more examples at [examples/quick_start](examples/frontend_language/quick_start).
 
 ### Language Feature
 To begin with, import sglang.
@@ -371,7 +404,7 @@ You can implement your prompt flow in a function decorated by `sgl.function`.
 You can then invoke the function with `run` or `run_batch`.
 The system will manage the state, chat template, parallelism and batching for you.
 
-The complete code for the examples below can be found at [readme_examples.py](examples/usage/readme_examples.py)
+The complete code for the examples below can be found at [readme_examples.py](examples/frontend_language/usage/readme_examples.py)
 
 #### Control Flow
 You can use any Python code within the function body, including control flow, nested function calls, and external libraries.
@@ -410,7 +443,7 @@ def tip_suggestion(s):
     s += "In summary" + sgl.gen("summary")
 ```
 
-#### Multi Modality
+#### Multi-Modality
 Use `sgl.image` to pass an image as input.
 
 ```python
@@ -420,7 +453,7 @@ def image_qa(s, image_file, question):
     s += sgl.assistant(sgl.gen("answer", max_tokens=256)
 ```
 
-See also [srt_example_llava.py](examples/quick_start/srt_example_llava.py).
+See also [srt_example_llava.py](examples/frontend_language/quick_start/local_example_llava_next.py).
 
 #### Constrained Decoding
 Use `regex` to specify a regular expression as a decoding constraint.
@@ -464,7 +497,7 @@ def character_gen(s, name):
     s += sgl.gen("json_output", max_tokens=256, regex=character_regex)
 ```
 
-See also [json_decode.py](examples/usage/json_decode.py) for an additional example on specifying formats with Pydantic models.
+See also [json_decode.py](examples/frontend_language/usage/json_decode.py) for an additional example of specifying formats with Pydantic models.
 
 #### Batching
 Use `run_batch` to run a batch of requests with continuous batching.
@@ -526,7 +559,6 @@ def chat_example(s):
 - The `choices` argument in `sgl.gen` is implemented by computing the [token-length normalized log probabilities](https://blog.eleuther.ai/multiple-choice-normalization/) of all choices and selecting the one with the highest probability.
 - The `regex` argument in `sgl.gen` is implemented through autoregressive decoding with logit bias masking, according to the constraints set by the regex. It is compatible with `temperature=0` and `temperature != 0`.
 
-
 ## Benchmark And Performance
 ![8b_throughput](https://lmsys.org/images/blog/sglang_llama3/8b_throughput.svg)
 ![70b_fp8_throughput](https://lmsys.org/images/blog/sglang_llama3/70b_fp8_throughput.svg)
@@ -534,7 +566,7 @@ def chat_example(s):
 Learn more at this [blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/).
 
 ## Roadmap
-[Development Roadmap (2024 Q3)](https://github.com/sgl-project/sglang/issues/634)
+[Development Roadmap (2024 Q4)](https://github.com/sgl-project/sglang/issues/1487)
 
 ## Citation And Acknowledgment
 Please cite our paper, [SGLang: Efficient Execution of Structured Language Model Programs](https://arxiv.org/abs/2312.07104), if you find the project useful.

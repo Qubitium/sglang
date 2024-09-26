@@ -29,16 +29,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -47,8 +38,17 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
+from sglang.srt.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.torchao_utils import apply_torchao_config_
+from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import InputMetadata
 
 
@@ -361,6 +361,7 @@ class Qwen2MoeForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
+        self.torchao_config = global_server_args_dict["torchao_config"]
         self.model = Qwen2MoeModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(
             config.vocab_size, config.hidden_size, quant_config=quant_config
@@ -380,17 +381,6 @@ class Qwen2MoeForCausalLM(nn.Module):
             input_ids, hidden_states, self.lm_head.weight, input_metadata
         )
 
-    def compute_logits(
-        self,
-        input_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        logits = self.logits_processor(
-            input_ids, hidden_states, self.lm_head.weight, input_metadata
-        )
-        return logits
-
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -401,24 +391,12 @@ class Qwen2MoeForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        expert_params_mapping = [
-            # These are the weights for the experts
-            # (param_name, weight_name, expert_id, shard_id)
-            (
-                (
-                    "experts.w13_weight"
-                    if weight_name in ["gate_proj", "up_proj"]
-                    else "experts.w2_weight"
-                ),
-                f"experts.{expert_id}.{weight_name}.weight",
-                expert_id,
-                shard_id,
-            )
-            for expert_id in range(self.config.num_experts)
-            for shard_id, weight_name in enumerate(
-                ["gate_proj", "down_proj", "up_proj"]
-            )
-        ]
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
@@ -458,7 +436,7 @@ class Qwen2MoeForCausalLM(nn.Module):
                     weight_loader(
                         param,
                         loaded_weight,
-                        weight_name,
+                        name,
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
@@ -475,6 +453,8 @@ class Qwen2MoeForCausalLM(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
+
+        apply_torchao_config_(self, params_dict, set(["proj.weight"]))
 
 
 EntryClass = Qwen2MoeForCausalLM

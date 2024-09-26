@@ -17,33 +17,30 @@ limitations under the License.
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
 from torch.nn import LayerNorm
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
+from sglang.srt.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.model_executor.forward_batch_info import InputMetadata
 
@@ -373,7 +370,6 @@ class ChatGLMForCausalLM(nn.Module):
         self.transformer = ChatGLMModel(config, cache_config, quant_config)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config)
-        self.sampler = Sampler()
 
     @torch.no_grad()
     def forward(
@@ -386,14 +382,6 @@ class ChatGLMForCausalLM(nn.Module):
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head.weight, input_metadata
         )
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
@@ -410,6 +398,8 @@ class ChatGLMForCausalLM(nn.Module):
             weight_loader(param, loaded_weight)
 
 
-EntryClass = ChatGLMForCausalLM
-# compat: glm model.config class == ChatGLMModel
-EntryClassRemapping = [("ChatGLMModel", ChatGLMForCausalLM)]
+class ChatGLMModel(ChatGLMForCausalLM):
+    pass
+
+
+EntryClass = [ChatGLMForCausalLM, ChatGLMModel]

@@ -22,11 +22,18 @@ import os
 import time
 import uuid
 from http import HTTPStatus
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from fastapi import HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
+
+try:
+    from outlines.fsm.json_schema import convert_json_schema_to_str
+except ImportError:
+    # Before outlines 0.0.47, convert_json_schema_to_str is under
+    # outlines.integrations.utils
+    from outlines.integrations.utils import convert_json_schema_to_str
 
 from sglang.srt.conversation import (
     Conversation,
@@ -88,19 +95,6 @@ file_id_storage: Dict[str, str] = {}
 storage_dir = None
 
 
-def format_finish_reason(finish_reason) -> Optional[str]:
-    if finish_reason.startswith("None"):
-        return None
-    elif finish_reason.startswith("FINISH_MATCHED"):
-        return "stop"
-    elif finish_reason.startswith("FINISH_LENGTH"):
-        return "length"
-    elif finish_reason.startswith("FINISH_ABORT"):
-        return "abort"
-    else:
-        return "unknown"
-
-
 def create_error_response(
     message: str,
     err_type: str = "BadRequestError",
@@ -123,7 +117,7 @@ def create_streaming_error_response(
 def load_chat_template_for_openai_api(tokenizer_manager, chat_template_arg):
     global chat_template_name
 
-    print(f"Use chat template: {chat_template_arg}")
+    logger.info(f"Use chat template: {chat_template_arg}")
     if not chat_template_exists(chat_template_arg):
         if not os.path.exists(chat_template_arg):
             raise RuntimeError(
@@ -275,10 +269,12 @@ async def process_batch(tokenizer_manager, batch_id: str, batch_request: BatchRe
         end_point = batch_storage[batch_id].endpoint
         file_request_list = []
         all_requests = []
+        request_ids = []
         for line in lines:
             request_data = json.loads(line)
             file_request_list.append(request_data)
             body = request_data["body"]
+            request_ids.append(request_data["custom_id"])
 
             # Although streaming is supported for standalone completions, it is not supported in
             # batch mode (multiple completions in single request).
@@ -289,12 +285,16 @@ async def process_batch(tokenizer_manager, batch_id: str, batch_request: BatchRe
                 all_requests.append(ChatCompletionRequest(**body))
             elif end_point == "/v1/completions":
                 all_requests.append(CompletionRequest(**body))
+
         if end_point == "/v1/chat/completions":
             adapted_request, request = v1_chat_generate_request(
-                all_requests, tokenizer_manager
+                all_requests, tokenizer_manager, request_ids=request_ids
             )
         elif end_point == "/v1/completions":
-            adapted_request, request = v1_generate_request(all_requests)
+            adapted_request, request = v1_generate_request(
+                all_requests, request_ids=request_ids
+            )
+
         try:
             ret = await tokenizer_manager.generate_request(adapted_request).__anext__()
             if not isinstance(ret, list):
@@ -326,6 +326,7 @@ async def process_batch(tokenizer_manager, batch_id: str, batch_request: BatchRe
             }
             all_ret.append(response_json)
             completed_requests += 1
+
         # Write results to a new file
         output_file_id = f"backend_result_file-{uuid.uuid4()}"
         global storage_dir
@@ -355,7 +356,7 @@ async def process_batch(tokenizer_manager, batch_id: str, batch_request: BatchRe
         }
 
     except Exception as e:
-        print("error in SGLang:", e)
+        logger.error("error in SGLang:", e)
         # Update batch status to "failed"
         retrieve_batch = batch_storage[batch_id]
         retrieve_batch.status = "failed"
@@ -370,6 +371,72 @@ async def v1_retrieve_batch(batch_id: str):
         raise HTTPException(status_code=404, detail="Batch not found")
 
     return batch_response
+
+
+async def v1_cancel_batch(tokenizer_manager, batch_id: str):
+    # Retrieve the batch job from the in-memory storage
+    batch_response = batch_storage.get(batch_id)
+    if batch_response is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    # Only do cancal when status is "validating" or "in_progress"
+    if batch_response.status in ["validating", "in_progress"]:
+        # Start cancelling the batch asynchronously
+        asyncio.create_task(
+            cancel_batch(
+                tokenizer_manager=tokenizer_manager,
+                batch_id=batch_id,
+                input_file_id=batch_response.input_file_id,
+            )
+        )
+
+        # Update batch status to "cancelling"
+        batch_response.status = "cancelling"
+
+        return batch_response
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Current status is {batch_response.status}, no need to cancel",
+        )
+
+
+async def cancel_batch(tokenizer_manager, batch_id: str, input_file_id: str):
+    try:
+        # Update the batch status to "cancelling"
+        batch_storage[batch_id].status = "cancelling"
+
+        # Retrieve the input file content
+        input_file_request = file_id_request.get(input_file_id)
+        if not input_file_request:
+            raise ValueError("Input file not found")
+
+        # Parse the JSONL file and process each request
+        input_file_path = file_id_storage.get(input_file_id)
+        with open(input_file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        file_request_list = []
+        request_ids = []
+        for line in lines:
+            request_data = json.loads(line)
+            file_request_list.append(request_data)
+            request_ids.append(request_data["custom_id"])
+
+        # Cancel requests by request_ids
+        for rid in request_ids:
+            tokenizer_manager.abort_request(rid=rid)
+
+        retrieve_batch = batch_storage[batch_id]
+        retrieve_batch.status = "cancelled"
+
+    except Exception as e:
+        logger.error("error in SGLang:", e)
+        # Update batch status to "failed"
+        retrieve_batch = batch_storage[batch_id]
+        retrieve_batch.status = "failed"
+        retrieve_batch.failed_at = int(time.time())
+        retrieve_batch.errors = {"message": str(e)}
 
 
 async def v1_retrieve_file(file_id: str):
@@ -392,7 +459,9 @@ async def v1_retrieve_file_content(file_id: str):
     return StreamingResponse(iter_file(), media_type="application/octet-stream")
 
 
-def v1_generate_request(all_requests: List[CompletionRequest]):
+def v1_generate_request(
+    all_requests: List[CompletionRequest], request_ids: List[str] = None
+):
     prompts = []
     sampling_params_list = []
     return_logprobs = []
@@ -403,7 +472,7 @@ def v1_generate_request(all_requests: List[CompletionRequest]):
     first_prompt_type = type(all_requests[0].prompt)
     for request in all_requests:
         assert (
-            type(request.prompt) == first_prompt_type
+            type(request.prompt) is first_prompt_type
         ), "All prompts must be of the same type in file input settings"
         if len(all_requests) > 1 and request.n > 1:
             raise ValueError(
@@ -434,6 +503,7 @@ def v1_generate_request(all_requests: List[CompletionRequest]):
                 "frequency_penalty": request.frequency_penalty,
                 "repetition_penalty": request.repetition_penalty,
                 "regex": request.regex,
+                "json_schema": request.json_schema,
                 "n": request.n,
                 "ignore_eos": request.ignore_eos,
             }
@@ -463,6 +533,7 @@ def v1_generate_request(all_requests: List[CompletionRequest]):
         logprob_start_len=logprob_start_lens,
         return_text_in_logprobs=True,
         stream=all_requests[0].stream,
+        rid=request_ids,
     )
 
     if len(all_requests) == 1:
@@ -534,8 +605,10 @@ def v1_generate_response(request, ret, tokenizer_manager, to_file=False):
                 "index": 0,
                 "text": text,
                 "logprobs": logprobs,
-                "finish_reason": format_finish_reason(
-                    ret_item["meta_info"]["finish_reason"]
+                "finish_reason": (
+                    ret_item["meta_info"]["finish_reason"]["type"]
+                    if ret_item["meta_info"]["finish_reason"]
+                    else ""
                 ),
             }
         else:
@@ -543,8 +616,10 @@ def v1_generate_response(request, ret, tokenizer_manager, to_file=False):
                 index=idx,
                 text=text,
                 logprobs=logprobs,
-                finish_reason=format_finish_reason(
-                    ret_item["meta_info"]["finish_reason"]
+                finish_reason=(
+                    ret_item["meta_info"]["finish_reason"]["type"]
+                    if ret_item["meta_info"]["finish_reason"]
+                    else ""
                 ),
             )
 
@@ -678,8 +753,10 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                         index=index,
                         text=delta,
                         logprobs=logprobs,
-                        finish_reason=format_finish_reason(
-                            content["meta_info"]["finish_reason"]
+                        finish_reason=(
+                            content["meta_info"]["finish_reason"]["type"]
+                            if content["meta_info"]["finish_reason"]
+                            else ""
                         ),
                     )
                     chunk = CompletionStreamResponse(
@@ -745,7 +822,9 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
 
 
 def v1_chat_generate_request(
-    all_requests: List[ChatCompletionRequest], tokenizer_manager
+    all_requests: List[ChatCompletionRequest],
+    tokenizer_manager,
+    request_ids: List[str] = None,
 ):
     input_ids = []
     sampling_params_list = []
@@ -753,6 +832,7 @@ def v1_chat_generate_request(
     return_logprobs = []
     logprob_start_lens = []
     top_logprobs_nums = []
+    modalities_list = []
 
     # NOTE: with openai API, the prompt's logprobs are always not computed
 
@@ -765,15 +845,39 @@ def v1_chat_generate_request(
         if not isinstance(request.messages, str):
             # Apply chat template and its stop strings.
             if chat_template_name is None:
+                openai_compatible_messages = []
+                for message in request.messages:
+                    if isinstance(message.content, str):
+                        openai_compatible_messages.append(
+                            {"role": message.role, "content": message.content}
+                        )
+                    else:
+                        content_list = message.dict()["content"]
+                        for content in content_list:
+                            if content["type"] == "text":
+                                openai_compatible_messages.append(
+                                    {"role": message.role, "content": content["text"]}
+                                )
+                if openai_compatible_messages[-1]["role"] == "assistant":
+                    assistant_prefix = openai_compatible_messages[-1]["content"]
+                    openai_compatible_messages = openai_compatible_messages[:-1]
+                else:
+                    assistant_prefix = None
                 prompt_ids = tokenizer_manager.tokenizer.apply_chat_template(
-                    request.messages, tokenize=True, add_generation_prompt=True
+                    openai_compatible_messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
                 )
+                if assistant_prefix:
+                    prompt_ids += tokenizer_manager.tokenizer.encode(assistant_prefix)
                 stop = request.stop
                 image_data = None
+                modalities = []
             else:
                 conv = generate_chat_conv(request, chat_template_name)
                 prompt = conv.get_prompt()
                 image_data = conv.image_data
+                modalities = conv.modalities
                 stop = conv.stop_str or []
                 if request.stop:
                     if isinstance(request.stop, str):
@@ -786,26 +890,33 @@ def v1_chat_generate_request(
             prompt_ids = request.messages
             stop = request.stop
             image_data = None
+            modalities = []
         input_ids.append(prompt_ids)
         return_logprobs.append(request.logprobs)
         logprob_start_lens.append(-1)
-        top_logprobs_nums.append(request.top_logprobs)
-        sampling_params_list.append(
-            {
-                "temperature": request.temperature,
-                "max_new_tokens": request.max_tokens,
-                "min_new_tokens": request.min_tokens,
-                "stop": stop,
-                "stop_token_ids": request.stop_token_ids,
-                "top_p": request.top_p,
-                "presence_penalty": request.presence_penalty,
-                "frequency_penalty": request.frequency_penalty,
-                "repetition_penalty": request.repetition_penalty,
-                "regex": request.regex,
-                "n": request.n,
-            }
-        )
+        top_logprobs_nums.append(request.top_logprobs or 0)
+
+        sampling_params = {
+            "temperature": request.temperature,
+            "max_new_tokens": request.max_tokens,
+            "min_new_tokens": request.min_tokens,
+            "stop": stop,
+            "stop_token_ids": request.stop_token_ids,
+            "top_p": request.top_p,
+            "presence_penalty": request.presence_penalty,
+            "frequency_penalty": request.frequency_penalty,
+            "repetition_penalty": request.repetition_penalty,
+            "regex": request.regex,
+            "n": request.n,
+        }
+        if request.response_format and request.response_format.type == "json_schema":
+            sampling_params["json_schema"] = convert_json_schema_to_str(
+                request.response_format.json_schema.schema_
+            )
+        sampling_params_list.append(sampling_params)
+
         image_data_list.append(image_data)
+        modalities_list.extend(modalities)
     if len(all_requests) == 1:
         input_ids = input_ids[0]
         if isinstance(input_ids, str):
@@ -817,6 +928,7 @@ def v1_chat_generate_request(
         return_logprobs = return_logprobs[0]
         logprob_start_lens = logprob_start_lens[0]
         top_logprobs_nums = top_logprobs_nums[0]
+        modalities_list = modalities_list[:1]
     else:
         if isinstance(input_ids[0], str):
             prompt_kwargs = {"text": input_ids}
@@ -832,6 +944,8 @@ def v1_chat_generate_request(
         top_logprobs_num=top_logprobs_nums,
         stream=all_requests[0].stream,
         return_text_in_logprobs=True,
+        rid=request_ids,
+        modalities=modalities_list,
     )
     if len(all_requests) == 1:
         return adapted_request, all_requests[0]
@@ -885,8 +999,10 @@ def v1_chat_generate_response(request, ret, to_file=False):
                 "index": 0,
                 "message": {"role": "assistant", "content": ret_item["text"]},
                 "logprobs": choice_logprobs,
-                "finish_reason": format_finish_reason(
-                    ret_item["meta_info"]["finish_reason"]
+                "finish_reason": (
+                    ret_item["meta_info"]["finish_reason"]["type"]
+                    if ret_item["meta_info"]["finish_reason"]
+                    else ""
                 ),
             }
         else:
@@ -894,8 +1010,10 @@ def v1_chat_generate_response(request, ret, to_file=False):
                 index=idx,
                 message=ChatMessage(role="assistant", content=ret_item["text"]),
                 logprobs=choice_logprobs,
-                finish_reason=format_finish_reason(
-                    ret_item["meta_info"]["finish_reason"]
+                finish_reason=(
+                    ret_item["meta_info"]["finish_reason"]["type"]
+                    if ret_item["meta_info"]["finish_reason"]
+                    else ""
                 ),
             )
 
@@ -1020,8 +1138,10 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
                             delta=DeltaMessage(role="assistant"),
-                            finish_reason=format_finish_reason(
-                                content["meta_info"]["finish_reason"]
+                            finish_reason=(
+                                content["meta_info"]["finish_reason"]["type"]
+                                if content["meta_info"]["finish_reason"]
+                                else ""
                             ),
                             logprobs=choice_logprobs,
                         )
@@ -1038,8 +1158,10 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=DeltaMessage(content=delta),
-                        finish_reason=format_finish_reason(
-                            content["meta_info"]["finish_reason"]
+                        finish_reason=(
+                            content["meta_info"]["finish_reason"]["type"]
+                            if content["meta_info"]["finish_reason"]
+                            else ""
                         ),
                         logprobs=choice_logprobs,
                     )

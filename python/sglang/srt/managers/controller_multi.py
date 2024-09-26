@@ -37,7 +37,7 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
 )
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils import kill_parent_process
+from sglang.srt.utils import configure_logger, kill_parent_process
 from sglang.utils import get_exception_traceback
 
 from sglang.srt.utils import flush_queue
@@ -76,7 +76,6 @@ class ControllerMulti:
             self,
             server_args: ServerArgs,
             port_args: PortArgs,
-            model_overide_args,
             router_chan: multiprocessing.Queue,
             detokenzier_chan: multiprocessing.Queue,
             idle_chan: multiprocessing.Queue
@@ -84,7 +83,6 @@ class ControllerMulti:
         # Parse args
         self.server_args = server_args
         self.port_args = port_args
-        self.model_overide_args = model_overide_args
         self.load_balance_method = LoadBalanceMethod.from_str(
             server_args.load_balance_method
         )
@@ -224,7 +222,6 @@ class ControllerMulti:
 def start_controller_process(
         server_args: ServerArgs,
         port_args: PortArgs,
-        model_overide_args,
         router_chan: multiprocessing.Queue,
         detokenizer_chan: multiprocessing.Queue,
         idle_chan: multiprocessing.Queue,
@@ -232,14 +229,10 @@ def start_controller_process(
 ):
     """Start a controller process."""
 
-    logging.basicConfig(
-        level=getattr(logging, server_args.log_level.upper()),
-        format="%(message)s",
-    )
+    configure_logger(server_args)
 
     try:
-        controller = ControllerMulti(server_args, port_args, model_overide_args, router_chan, detokenizer_chan,
-                                     idle_chan)
+        controller = ControllerMulti(server_args, port_args, router_chan, detokenizer_chan, idle_chan)
     except Exception:
         startup_chan.put_nowait(get_exception_traceback())
         raise
