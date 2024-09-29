@@ -86,7 +86,6 @@ class ServerArgs:
     json_model_override_args: str = "{}"
 
     # Optimization/debug options
-    disable_sliding_window: bool = False
     attention_backend: Optional[str] = None
     sampling_backend: Optional[str] = None
     disable_flashinfer: bool = False
@@ -108,6 +107,10 @@ class ServerArgs:
     # LoRA
     lora_paths: Optional[List[str]] = None
     max_loras_per_batch: int = 8
+
+    # lbx add
+    disable_sliding_window: bool = False
+    first_gpu_reduce_memory_fraction: float = 0
 
     def __post_init__(self):
         # Set missing default values
@@ -459,11 +462,6 @@ class ServerArgs:
             help="Choose the kernels for sampling layers.",
         )
         parser.add_argument(
-            "--disable-sliding-window",
-            action="store_true",
-            help="Disable sliding-window",
-        )
-        parser.add_argument(
             "--disable-flashinfer",
             action="store_true",
             help="Disable flashinfer attention kernels. This option will be deprecated in the next release. Please use '--attention-backend triton' instead.",
@@ -562,6 +560,19 @@ class ServerArgs:
             type=int,
             default=8,
             help="Maximum number of adapters for a running batch, include base-only request",
+        )
+
+        # lbx add
+        parser.add_argument(
+            "--disable-sliding-window",
+            action="store_true",
+            help="Disable sliding-window",
+        )
+        parser.add_argument(
+            "--first-gpu-reduce-memory-fraction",
+            type=float,
+            default=0,
+            help="The first GPU will have an additional memory fraction subtracted because the main process will occupy a portion of the GPU memory.",
         )
 
     @classmethod
