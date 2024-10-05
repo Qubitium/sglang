@@ -97,15 +97,9 @@ class ModelTpServer:
             context_length=server_args.context_length,
             model_override_args=json.loads(server_args.json_model_override_args),
         )
-        if (gpu_id == 0 and server_args.first_gpu_reduce_memory_fraction != 0
-                and server_args.first_gpu_reduce_memory_fraction < server_args.mem_fraction_static):
-            mem_fraction_static = server_args.mem_fraction_static - server_args.first_gpu_reduce_memory_fraction
-        else:
-            mem_fraction_static = server_args.mem_fraction_static
-
         self.model_runner = ModelRunner(
             model_config=self.model_config,
-            mem_fraction_static=mem_fraction_static,
+            mem_fraction_static=server_args.mem_fraction_static,
             gpu_id=gpu_id,
             tp_rank=tp_rank,
             tp_size=server_args.tp_size,
