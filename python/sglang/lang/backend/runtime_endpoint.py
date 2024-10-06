@@ -1,6 +1,6 @@
 import json
 import warnings
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from sglang.global_config import global_config
 from sglang.lang.backend.base_backend import BaseBackend
@@ -24,6 +24,7 @@ class RuntimeEndpoint(BaseBackend):
         api_key: Optional[str] = None,
         verify: Optional[str] = None,
         chat_template_name: Optional[str] = None,
+        model_info: Optional[Dict[str, str]]=None,
     ):
         super().__init__()
         self.support_concate_and_append = True
@@ -32,13 +33,14 @@ class RuntimeEndpoint(BaseBackend):
         self.api_key = api_key
         self.verify = verify
 
-        res = http_request(
-            self.base_url + "/get_model_info",
-            api_key=self.api_key,
-            verify=self.verify,
-        )
-        self._assert_success(res)
-        self.model_info = res.json()
+        # res = http_request(
+        #     self.base_url + "/get_model_info",
+        #     api_key=self.api_key,
+        #     verify=self.verify,
+        # )
+        # self._assert_success(res)
+        # self.model_info = res.json()
+        self.model_info = model_info
 
         if chat_template_name:
             self.chat_template = get_chat_template(chat_template_name)
@@ -235,6 +237,7 @@ class RuntimeEndpoint(BaseBackend):
         data = {"text": s.text_, "sampling_params": {"max_new_tokens": 0}}
         obj = self._generate_http_request(s, data)
         prompt_len = obj["meta_info"]["prompt_tokens"]
+        logprob_start_len = max(prompt_len - 2, 0)  # For token healing
 
         # Compute logprob
         data = {
@@ -244,7 +247,8 @@ class RuntimeEndpoint(BaseBackend):
                 "temperature": 0,
             },
             "return_logprob": True,
-            "logprob_start_len": max(prompt_len - 2, 0),  # for token healing
+            "return_text_in_logprobs": True,
+            "logprob_start_len": logprob_start_len,
         }
         obj = self._generate_http_request(s, data)
 
@@ -253,6 +257,17 @@ class RuntimeEndpoint(BaseBackend):
         ]
         input_token_logprobs = [r["meta_info"]["input_token_logprobs"] for r in obj]
         output_token_logprobs = [r["meta_info"]["output_token_logprobs"] for r in obj]
+
+        # Remove extra token if no token healing occurred
+        for i in range(len(input_token_logprobs)):
+            healed_token_str = input_token_logprobs[i][0][-1]
+            if s.text_.endswith(healed_token_str):
+                healed_token_logprob = input_token_logprobs[i][0][0]
+                normalized_prompt_logprobs[i] = (
+                    normalized_prompt_logprobs[i] * len(input_token_logprobs[i])
+                    - healed_token_logprob
+                ) / (len(input_token_logprobs[i]) - 1)
+                input_token_logprobs[i] = input_token_logprobs[i][1:]
 
         # Compute unconditional logprobs if required
         if choices_method.requires_unconditional_logprobs:

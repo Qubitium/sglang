@@ -44,13 +44,14 @@ class ModelCase:
 
 # Popular models that run on CI
 CI_MODELS = [
-    ModelCase("meta-llama/Meta-Llama-3.1-8B-Instruct"),
+    ModelCase("meta-llama/Llama-3.1-8B-Instruct"),
     ModelCase("google/gemma-2-2b"),
 ]
 
 # All other models
 ALL_OTHER_MODELS = [
     ModelCase("Qwen/Qwen2-1.5B"),
+    ModelCase("Qwen/Qwen2.5-14B-Instruct"),
     ModelCase("HuggingFaceTB/SmolLM-135M-Instruct"),
 ]
 
@@ -73,7 +74,9 @@ class TestGenerationModels(unittest.TestCase):
         max_new_tokens = 32
 
         with HFRunner(
-            model_path, torch_dtype=torch_dtype, is_generation=True
+            model_path,
+            torch_dtype=torch_dtype,
+            model_type="generation",
         ) as hf_runner:
             hf_outputs = hf_runner.forward(prompts, max_new_tokens=max_new_tokens)
 
@@ -81,7 +84,7 @@ class TestGenerationModels(unittest.TestCase):
             model_path,
             tp_size=model_case.tp_size,
             torch_dtype=torch_dtype,
-            is_generation=True,
+            model_type="generation",
         ) as srt_runner:
             srt_outputs = srt_runner.forward(prompts, max_new_tokens=max_new_tokens)
 
