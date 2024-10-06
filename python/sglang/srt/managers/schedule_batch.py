@@ -815,12 +815,6 @@ class ScheduleBatch:
                 req.regex_fsm_state for req in self.reqs
             ]
 
-        prefix_lens = None
-        if self.forward_mode != ForwardMode.DECODE:
-            prefix_lens = torch.tensor(
-                [len(r.prefix_indices) for r in self.reqs], device="cuda"
-            )
-
         return ModelWorkerBatch(
             forward_mode=self.forward_mode,
             input_ids=self.input_ids,
@@ -836,7 +830,6 @@ class ScheduleBatch:
             lora_paths=lora_paths,
             sampling_info=self.sampling_info,
             logits_processors=self.custom_logits_processors(),
-            prefix_lens=prefix_lens,
         )
 
 
@@ -873,4 +866,3 @@ class ModelWorkerBatch:
 
     # lbx add
     logits_processors: Optional[List[List[CustomLogitsProcessor]]]
-    prefix_lens: Optional[torch.Tensor]
