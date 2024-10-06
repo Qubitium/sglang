@@ -1018,7 +1018,7 @@ def run_scheduler_process(
         scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, router_chan, detokenizer_chan, idle_chan,)
         startup_chan.put_nowait("ready")
         scheduler.event_loop()
-    except Exception:
+    except BaseException:
         msg = get_exception_traceback()
         logger.error(msg)
         kill_parent_process()

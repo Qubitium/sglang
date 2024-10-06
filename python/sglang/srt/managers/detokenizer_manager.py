@@ -192,7 +192,7 @@ def run_detokenizer_process(
     try:
         manager = DetokenizerManager(server_args, port_args)
         manager.event_loop()
-    except Exception:
+    except BaseException:
         msg = get_exception_traceback()
         logger.error(msg)
         kill_parent_process()
