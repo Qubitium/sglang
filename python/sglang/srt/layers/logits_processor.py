@@ -188,21 +188,14 @@ class LogitsProcessor(nn.Module):
         last_logits = last_logits[:, : self.config.vocab_size].float()
 
         if last_logits is not None and forward_batch is not None and forward_batch.logits_processors is not None and len(
-                forward_batch.logits_processors) > 0:
-            input_ids_list = input_ids.tolist()
+                forward_batch.logits_processors) > 0 and forward_batch.previous_tokens:
             seq_lens = forward_batch.seq_lens.tolist()
-            if forward_batch.batch_size == len(input_ids):
-                last_ids = input_ids_list
-            else:  # If it is the first forward of a batch, last_id needs to be obtained based on index.
-                last_ids = []
-                for i, seq_len in enumerate(seq_lens):
-                    prefix_len = forward_batch.extend_prefix_lens[i]
-                    last_ids.append(input_ids_list[seq_len - prefix_len - 1])
+            previous_tokens = forward_batch.previous_tokens
             for i, logits_processors in enumerate(forward_batch.logits_processors):
-                last_id = last_ids[i]
+                previous_token = previous_tokens[i]
                 logits = last_logits[i]
                 for logits_processor in logits_processors:
-                    logits = logits_processor(last_id, logits, seq_lens[i])
+                    logits = logits_processor(previous_token, logits, seq_lens[i])
                 last_logits[i] = logits
 
         if hasattr(self.config, "final_logit_softcapping"):

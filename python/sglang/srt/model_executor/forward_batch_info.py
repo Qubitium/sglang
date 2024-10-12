@@ -116,6 +116,7 @@ class ForwardBatch:
 
     # lbx add
     logits_processors: Optional[List[List[CustomLogitsProcessor]]] = None
+    previous_tokens: Optional[List[int]] = None
 
     @classmethod
     def init_new(
@@ -137,6 +138,7 @@ class ForwardBatch:
             lora_paths=batch.lora_paths,
             sampling_info=batch.sampling_info,
             logits_processors=batch.logits_processors,
+            previous_tokens=batch.previous_tokens,
         )
 
         # Init position information

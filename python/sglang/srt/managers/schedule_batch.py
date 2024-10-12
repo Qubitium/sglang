@@ -234,6 +234,13 @@ class Req:
         self.regex_fsm_state: int = 0
         self.jump_forward_map: JumpForwardMap = None
 
+    def previous_token(self) -> int:
+        # If there are no output_ids yet, we take the last one from prompt.
+        if len(self.output_ids) == 0:
+            return self.origin_input_ids[-1]
+        else:
+            return self.output_ids[-1]
+
     # whether request reached finished condition
     def finished(self) -> bool:
         return self.finished_reason is not None
@@ -457,6 +464,9 @@ class ScheduleBatch:
 
     def custom_logits_processors(self) -> List[List[CustomLogitsProcessor]]:
         return [r.sampling_params.logits_processors for r in self.reqs]
+
+    def get_previous_tokens(self) -> List[int]:
+        return [r.previous_token() for r in self.reqs]
 
     def alloc_req_slots(self, num_reqs):
         req_pool_indices = self.req_to_token_pool.alloc(num_reqs)
@@ -757,6 +767,10 @@ class ScheduleBatch:
             return
 
         self.reqs = [self.reqs[i] for i in unfinished_indices]
+        # lbx add: update logits_processors
+        self.logits_processors=self.custom_logits_processors()
+        self.previous_tokens=self.get_previous_tokens()
+
         new_indices = torch.tensor(unfinished_indices, dtype=torch.int32, device="cuda")
         self.req_pool_indices = self.req_pool_indices[new_indices]
         self.seq_lens = self.seq_lens[new_indices]
@@ -792,6 +806,9 @@ class ScheduleBatch:
         elif other.return_logprob:
             self.top_logprobs_nums = [0] * len(self.reqs) + other.top_logprobs_nums
         self.reqs.extend(other.reqs)
+        # lbx add: update logits_processors
+        self.logits_processors=self.custom_logits_processors()
+        self.previous_tokens=self.get_previous_tokens()
 
         self.return_logprob = self.return_logprob or other.return_logprob
         self.has_stream = self.has_stream or other.has_stream
@@ -830,6 +847,7 @@ class ScheduleBatch:
             lora_paths=lora_paths,
             sampling_info=self.sampling_info,
             logits_processors=self.custom_logits_processors(),
+            previous_tokens=self.get_previous_tokens(),
         )
 
 
@@ -865,4 +883,5 @@ class ModelWorkerBatch:
     sampling_info: SamplingBatchInfo
 
     # lbx add
-    logits_processors: Optional[List[List[CustomLogitsProcessor]]]
+    logits_processors: List[List[CustomLogitsProcessor]]
+    previous_tokens: List[int]
