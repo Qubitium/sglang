@@ -235,6 +235,7 @@ class ModelRunner:
         self.load_config = LoadConfig(load_format=self.server_args.load_format)
         self.vllm_model_config = VllmModelConfig(
             model=self.server_args.model_path,
+            task="auto",
             quantization=self.server_args.quantization,
             tokenizer=None,
             tokenizer_mode=None,
@@ -298,6 +299,7 @@ class ModelRunner:
             # TODO: Use a better method to check this
             vllm_model_config = VllmModelConfig(
                 model=model_path,
+                task="auto",
                 quantization=self.server_args.quantization,
                 tokenizer=None,
                 tokenizer_mode=None,
