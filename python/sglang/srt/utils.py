@@ -450,14 +450,8 @@ def monkey_patch_vllm_dummy_weight_loader():
     """
 
     from vllm.model_executor.model_loader.loader import (
-        CacheConfig,
-        DeviceConfig,
+        VllmConfig,
         DummyModelLoader,
-        LoRAConfig,
-        ModelConfig,
-        ParallelConfig,
-        SchedulerConfig,
-        MultiModalConfig,
         _initialize_model,
         initialize_dummy_weights,
         nn,
@@ -467,13 +461,12 @@ def monkey_patch_vllm_dummy_weight_loader():
     def load_model(
         self,
         *,
-        model_config: ModelConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        cache_config: CacheConfig,
+        vllm_config: VllmConfig,
     ) -> nn.Module:
+        model_config = vllm_config.model_config
+        lora_config = vllm_config.lora_config
+        device_config = vllm_config.device_config
+        cache_config = vllm_config.cache_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(

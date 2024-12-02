@@ -32,7 +32,7 @@ from typing import Optional, Type
 
 import torch
 import torch.nn as nn
-from vllm.config import DeviceConfig, LoadConfig
+from vllm.config import DeviceConfig, LoadConfig, VllmConfig
 from vllm.config import ModelConfig as VllmModelConfig
 from vllm.distributed import (
     get_tp_group,
@@ -251,17 +251,15 @@ class ModelRunner:
                 self.model_config.model_override_args
             )
         self.dtype = self.vllm_model_config.dtype
-
-        # Load the model
-        self.model = get_model(
-            model_config=self.vllm_model_config,
-            load_config=self.load_config,
-            device_config=self.device_config,
-            parallel_config=None,
-            scheduler_config=None,
-            lora_config=None,
-            cache_config=None,
+        vllm_config = VllmConfig()
+        vllm_config.model_config = self.vllm_model_config
+        vllm_config.load_config = self.load_config
+        vllm_config.device_config = self.device_config
+        vllm_config.quant_config = VllmConfig._get_quantization_config(
+            vllm_config.model_config, vllm_config.load_config
         )
+        # Load the model
+        self.model = get_model(vllm_config=vllm_config)
         self.sliding_window_size = None if self.server_args.disable_sliding_window else (
             self.model.get_attention_sliding_window_size()
             if hasattr(self.model, "get_attention_sliding_window_size")
