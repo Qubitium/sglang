@@ -1,18 +1,16 @@
-"""
-Copyright 2023-2024 SGLang Team
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 """Sampling parameters for text generation."""
 
 from typing import List, Optional, Union, Callable
@@ -26,12 +24,19 @@ tokens and a tensor of the logits for the next token, and returns a modified
 tensor of logits to sample from."""
 
 class SamplingParams:
+    """
+    The sampling parameters.
+
+    See docs/references/sampling_params.md or
+    https://sgl-project.github.io/references/sampling_params.html
+    for the documentation.
+    """
+
     def __init__(
         self,
         max_new_tokens: int = 128,
-        min_new_tokens: int = 0,
         stop: Optional[Union[str, List[str]]] = None,
-        stop_token_ids: Optional[List[int]] = [],
+        stop_token_ids: Optional[List[int]] = None,
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
@@ -39,13 +44,16 @@ class SamplingParams:
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
         repetition_penalty: float = 1.0,
-        ignore_eos: bool = False,
-        skip_special_tokens: bool = True,
+        min_new_tokens: int = 0,
         spaces_between_special_tokens: bool = True,
-        regex: Optional[str] = None,
-        logits_processors: Optional[List[CustomLogitsProcessor]] = None,
         n: int = 1,
         json_schema: Optional[str] = None,
+        regex: Optional[str] = None,
+        ebnf: Optional[str] = None,
+        no_stop_trim: bool = False,
+        ignore_eos: bool = False,
+        skip_special_tokens: bool = True,
+        logits_processors: Optional[List[CustomLogitsProcessor]] = None,
     ) -> None:
         self.temperature = temperature
         self.top_p = top_p
@@ -55,16 +63,20 @@ class SamplingParams:
         self.presence_penalty = presence_penalty
         self.repetition_penalty = repetition_penalty
         self.stop_strs = stop
-        self.stop_token_ids = {*stop_token_ids}
+        if stop_token_ids:
+            self.stop_token_ids = set(stop_token_ids)
+        else:
+            self.stop_token_ids = None
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
         self.ignore_eos = ignore_eos
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.regex = regex
-        self.logits_processors = logits_processors if logits_processors else []
         self.n = n
         self.json_schema = json_schema
+        self.ebnf = ebnf
+        self.no_stop_trim = no_stop_trim
 
         # Process some special cases
         if self.temperature < _SAMPLING_EPS:
@@ -72,6 +84,8 @@ class SamplingParams:
             self.top_k = 1
         if self.top_k == -1:
             self.top_k = 1 << 30  # whole vocabulary
+
+        self.logits_processors = logits_processors if logits_processors else []
 
     def verify(self):
         if self.temperature < 0.0:
@@ -115,17 +129,19 @@ class SamplingParams:
                     f"min_new_tokens must be in (0, max_new_tokens({self.max_new_tokens})], got "
                     f"{self.min_new_tokens}."
                 )
-        if self.regex is not None and self.json_schema is not None:
-            raise ValueError("regex and json_schema cannot be both set.")
+        grammars = [
+            self.json_schema,
+            self.regex,
+            self.ebnf,
+        ]  # since mutually exclusive, only one can be set
+        if sum(x is not None for x in grammars) > 1:
+            raise ValueError("Only one of regex, json_schema, or ebnf can be set.")
 
     def normalize(self, tokenizer):
         # Process stop strings
         if self.stop_strs is None:
             self.stop_strs = []
-            if self.stop_token_ids is None:
-                self.stop_str_max_len = 0
-            else:
-                self.stop_str_max_len = 1
+            self.stop_str_max_len = 0
         else:
             if isinstance(self.stop_strs, str):
                 self.stop_strs = [self.stop_strs]
@@ -138,17 +154,3 @@ class SamplingParams:
                 else:
                     stop_str_max_len = max(stop_str_max_len, len(stop_str))
             self.stop_str_max_len = stop_str_max_len
-
-    def to_srt_kwargs(self):
-        return {
-            "max_new_tokens": self.max_new_tokens,
-            "stop": self.stop_strs,
-            "stop_token_ids": list(self.stop_token_ids),
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,
-            "frequency_penalty": self.frequency_penalty,
-            "presence_penalty": self.presence_penalty,
-            "ignore_eos": self.ignore_eos,
-            "regex": self.regex,
-        }

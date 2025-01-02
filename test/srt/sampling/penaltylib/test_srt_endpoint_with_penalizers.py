@@ -4,9 +4,9 @@ from multiprocessing import Process
 
 import requests
 
-from sglang.srt.utils import kill_child_process
+from sglang.srt.utils import kill_process_tree
 from sglang.test.test_utils import (
-    DEFAULT_MODEL_NAME_FOR_TEST,
+    DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     popen_launch_server,
@@ -17,7 +17,7 @@ class TestBatchPenalizerE2E(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST
+        cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
             cls.model,
@@ -31,7 +31,7 @@ class TestBatchPenalizerE2E(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        kill_child_process(cls.process.pid)
+        kill_process_tree(cls.process.pid)
 
     def run_decode(
         self,

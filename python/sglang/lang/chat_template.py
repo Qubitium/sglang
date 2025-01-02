@@ -116,6 +116,23 @@ register_chat_template(
     )
 )
 
+
+register_chat_template(
+    ChatTemplate(
+        name="chatml-llava",
+        default_system_prompt="You are a helpful assistant.",
+        role_prefix_and_suffix={
+            "system": ("<|im_start|>system\n", "<|im_end|>\n"),
+            "user": ("<|im_start|>user\n", "<|im_end|>\n"),
+            "assistant": ("<|im_start|>assistant\n", "<|im_end|>\n"),
+        },
+        style=ChatTemplateStyle.PLAIN,
+        stop_str=("<|im_end|>",),
+        image_token="<image>\n",
+    )
+)
+
+
 # There is default system prompt for qwen
 # reference: https://modelscope.cn/models/qwen/Qwen2-72B-Instruct/file/view/master?fileName=tokenizer_config.json&status=1
 # The chat template is: "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
@@ -133,10 +150,10 @@ register_chat_template(
     )
 )
 
-
+# Reference: https://huggingface.co/docs/transformers/main/model_doc/qwen2_vl#usage-example
 register_chat_template(
     ChatTemplate(
-        name="chatml-llava",
+        name="qwen2-vl",
         default_system_prompt="You are a helpful assistant.",
         role_prefix_and_suffix={
             "system": ("<|im_start|>system\n", "<|im_end|>\n"),
@@ -145,7 +162,7 @@ register_chat_template(
         },
         style=ChatTemplateStyle.PLAIN,
         stop_str=("<|im_end|>",),
-        image_token="<image>\n",
+        image_token="<|vision_start|><|image_pad|><|vision_end|>",
     )
 )
 
@@ -163,21 +180,6 @@ register_chat_template(
             "assistant": ("ASSISTANT:", "</s>"),
         },
         image_token=" <image>\n",
-    )
-)
-
-# Reference: https://modelscope.cn/models/01ai/Yi-1.5-34B-Chat/file/view/master?fileName=tokenizer_config.json&status=1
-register_chat_template(
-    ChatTemplate(
-        name="yi-1.5",
-        default_system_prompt=None,
-        role_prefix_and_suffix={
-            "system": ("", ""),
-            "user": ("<|im_start|>user\n", "<|im_end|>\n<|im_start|>assistant\n"),
-            "assistant": ("", "<|im_end|>\n"),
-        },
-        style=ChatTemplateStyle.PLAIN,
-        stop_str=("<|im_end|>",),
     )
 )
 
@@ -213,6 +215,46 @@ register_chat_template(
             ),
         },
         stop_str=("<|eot_id|>",),
+        image_token="<|image|>",
+    )
+)
+
+# The difference between "llama-3-instruct-llava" and "llama-3-instruct" is that llava uses a different image_token.
+register_chat_template(
+    ChatTemplate(
+        name="llama-3-instruct-llava",
+        default_system_prompt=None,
+        role_prefix_and_suffix={
+            "system": (
+                "<|start_header_id|>system<|end_header_id|>\n\n",
+                "<|eot_id|>",
+            ),
+            "user": (
+                "<|start_header_id|>user<|end_header_id|>\n\n",
+                "<|eot_id|>",
+            ),
+            "assistant": (
+                "<|start_header_id|>assistant<|end_header_id|>\n\n",
+                "<|eot_id|>",
+            ),
+        },
+        stop_str=("<|eot_id|>",),
+        image_token="<image>\n",
+    )
+)
+
+# Reference: https://modelscope.cn/models/01ai/Yi-1.5-34B-Chat/file/view/master?fileName=tokenizer_config.json&status=1
+register_chat_template(
+    ChatTemplate(
+        name="yi-1.5",
+        default_system_prompt=None,
+        role_prefix_and_suffix={
+            "system": ("", ""),
+            "user": ("<|im_start|>user\n", "<|im_end|>\n<|im_start|>assistant\n"),
+            "assistant": ("", "<|im_end|>\n"),
+        },
+        style=ChatTemplateStyle.PLAIN,
+        stop_str=("<|im_end|>",),
     )
 )
 
@@ -275,6 +317,28 @@ register_chat_template(
             ),
         },
         style=ChatTemplateStyle.PLAIN,
+    )
+)
+
+register_chat_template(
+    ChatTemplate(
+        name="granite-3-instruct",
+        default_system_prompt=None,
+        role_prefix_and_suffix={
+            "system": (
+                "<|start_of_role|>system<|end_of_role|>",
+                "<|end_of_text|>",
+            ),
+            "user": (
+                "<|start_of_role|>user<|end_of_role|>",
+                "<|end_of_text|>",
+            ),
+            "assistant": (
+                "<|start_of_role|>assistant<|end_of_role|>",
+                "<|end_of_text|>",
+            ),
+        },
+        stop_str=("<|end_of_text|>",),
     )
 )
 
@@ -358,6 +422,16 @@ def match_c4ai_command_r(model_path: str):
     model_path = model_path.lower()
     if "c4ai-command-r" in model_path:
         return get_chat_template("c4ai-command-r")
+
+
+@register_chat_template_matching_function
+def match_granite_instruct(model_path: str):
+    model_path = model_path.lower()
+    # When future versions of Granite are released, this code may
+    # need to be updated. For now, assume that the Granite 3.0
+    # template works across the board.
+    if "granite" in model_path and "instruct" in model_path:
+        return get_chat_template("granite-3-instruct")
 
 
 if __name__ == "__main__":

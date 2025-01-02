@@ -1,8 +1,14 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Optional
 
-from torch import nn
+import torch
 
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+if TYPE_CHECKING:
+    from sglang.srt.layers.radix_attention import RadixAttention
+    from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+    from sglang.srt.speculative.spec_info import SpecInfo
 
 
 class AttentionBackend(ABC):
@@ -18,13 +24,27 @@ class AttentionBackend(ABC):
         raise NotImplementedError()
 
     def init_forward_metadata_capture_cuda_graph(
-        self, bs: int, req_pool_indices, seq_lens
+        self,
+        bs: int,
+        num_token: int,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        encoder_lens: Optional[torch.Tensor],
+        forward_mode: ForwardMode,
+        spec_info: Optional[SpecInfo],
     ):
         """Init the metadata for a forward pass for capturing a cuda graph."""
         raise NotImplementedError()
 
     def init_forward_metadata_replay_cuda_graph(
-        self, bs: int, req_pool_indices, seq_lens
+        self,
+        bs: int,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_sum: int,
+        encoder_lens: Optional[torch.Tensor],
+        forward_mode: ForwardMode,
+        spec_info: Optional[SpecInfo],
     ):
         """Init the metadata for a forward pass for replying a cuda graph."""
         raise NotImplementedError()
@@ -33,17 +53,41 @@ class AttentionBackend(ABC):
         """Get the fill value for padded seq lens. Typically, it is 0 or 1."""
         raise NotImplementedError()
 
-    def forward(self, q, k, v, layer: nn.Module, forward_batch: ForwardBatch):
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer: RadixAttention,
+        forward_batch: ForwardBatch,
+        save_kv_cache: bool = True,
+    ):
         """Run forward on an attention layer."""
         if forward_batch.forward_mode.is_decode():
-            return self.forward_decode(q, k, v, layer, forward_batch)
+            return self.forward_decode(q, k, v, layer, forward_batch, save_kv_cache)
         else:
-            return self.forward_extend(q, k, v, layer, forward_batch)
+            return self.forward_extend(q, k, v, layer, forward_batch, save_kv_cache)
 
-    def forward_decode(self, q, k, v, layer: nn.Module, forward_batch: ForwardBatch):
+    def forward_decode(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer: RadixAttention,
+        forward_batch: ForwardBatch,
+        save_kv_cache: bool = True,
+    ):
         """Run a forward for decode."""
         raise NotImplementedError()
 
-    def forward_extend(self, q, k, v, layer: nn.Module, forward_batch: ForwardBatch):
+    def forward_extend(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer: RadixAttention,
+        forward_batch: ForwardBatch,
+        save_kv_cache: bool = True,
+    ):
         """Run a forward for extend."""
         raise NotImplementedError()

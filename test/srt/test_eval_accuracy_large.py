@@ -1,7 +1,12 @@
+"""
+Usage:
+python -m unittest test_eval_accuracy_large.TestEvalAccuracyLarge.test_mmlu
+"""
+
 import unittest
 from types import SimpleNamespace
 
-from sglang.srt.utils import kill_child_process
+from sglang.srt.utils import kill_process_tree
 from sglang.test.run_eval import run_eval
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST,
@@ -25,19 +30,19 @@ class TestEvalAccuracyLarge(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        kill_child_process(cls.process.pid)
+        kill_process_tree(cls.process.pid)
 
     def test_mmlu(self):
         args = SimpleNamespace(
             base_url=self.base_url,
             model=self.model,
             eval_name="mmlu",
-            num_examples=3000,
+            num_examples=5000,
             num_threads=1024,
         )
 
         metrics = run_eval(args)
-        assert metrics["score"] >= 0.705, f"{metrics}"
+        self.assertGreater(metrics["score"], 0.71)
 
     def test_human_eval(self):
         args = SimpleNamespace(
@@ -49,7 +54,7 @@ class TestEvalAccuracyLarge(unittest.TestCase):
         )
 
         metrics = run_eval(args)
-        assert metrics["score"] >= 0.64, f"{metrics}"
+        self.assertGreater(metrics["score"], 0.64)
 
     def test_mgsm_en(self):
         args = SimpleNamespace(
@@ -61,7 +66,7 @@ class TestEvalAccuracyLarge(unittest.TestCase):
         )
 
         metrics = run_eval(args)
-        assert metrics["score"] >= 0.84, f"{metrics}"
+        self.assertGreater(metrics["score"], 0.835)
 
 
 if __name__ == "__main__":

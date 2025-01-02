@@ -1,25 +1,26 @@
-"""
-Copyright 2023-2024 SGLang Team
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 """DetokenizerManager is a process that detokenizes the token ids."""
 
 import dataclasses
 import logging
+import signal
 from collections import OrderedDict
-from typing import List
+from typing import Dict, List, Union
 
+import psutil
+import setproctitle
 import zmq
 
 from sglang.srt.hf_transformers_utils import get_tokenizer
@@ -27,11 +28,9 @@ from sglang.srt.managers.io_struct import (
     BatchEmbeddingOut,
     BatchStrOut,
     BatchTokenIDOut,
-    UpdateWeightReqOutput,
 )
-from sglang.srt.managers.schedule_batch import FINISH_MATCHED_STR
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils import configure_logger, kill_parent_process
+from sglang.srt.utils import configure_logger, get_zmq_socket
 from sglang.utils import find_printable_text, get_exception_traceback
 
 logger = logging.getLogger(__name__)
@@ -58,11 +57,12 @@ class DetokenizerManager:
     ):
         # Init inter-process communication
         context = zmq.Context(2)
-        self.recv_from_scheduler = context.socket(zmq.PULL)
-        self.recv_from_scheduler.bind(f"ipc://{port_args.detokenizer_ipc_name}")
-
-        self.send_to_tokenizer = context.socket(zmq.PUSH)
-        self.send_to_tokenizer.connect(f"ipc://{port_args.tokenizer_ipc_name}")
+        self.recv_from_scheduler = get_zmq_socket(
+            context, zmq.PULL, port_args.detokenizer_ipc_name
+        )
+        self.send_to_tokenizer = get_zmq_socket(
+            context, zmq.PUSH, port_args.tokenizer_ipc_name
+        )
 
         if server_args.skip_tokenizer_init:
             self.tokenizer = None
@@ -75,6 +75,29 @@ class DetokenizerManager:
 
         self.decode_status = LimitedCapacityDict()
 
+    def trim_matched_stop(
+        self, output: Union[str, List[int]], finished_reason: Dict, no_stop_trim: bool
+    ):
+        if no_stop_trim or not finished_reason:
+            return output
+
+        matched = finished_reason.get("matched", None)
+        if not matched:
+            return output
+
+        # TODO(lmzheng): handle the case where multiple stop strs are hit
+
+        # Trim stop str.
+        if isinstance(matched, str) and isinstance(output, str):
+            pos = output.find(matched)
+            return output[:pos] if pos != -1 else output
+
+        # Trim stop token.
+        if isinstance(matched, int) and isinstance(output, list):
+            assert len(output) > 0
+            return output[:-1]
+        return output
+
     def event_loop(self):
         """The event loop that handles requests"""
 
@@ -83,25 +106,11 @@ class DetokenizerManager:
 
             if isinstance(recv_obj, BatchEmbeddingOut):
                 # If it is embedding model, no detokenization is needed.
-                self.send_to_tokenizer.send_pyobj(
-                    BatchEmbeddingOut(
-                        rids=recv_obj.rids,
-                        embeddings=recv_obj.embeddings,
-                        meta_info=recv_obj.meta_info,
-                        finished_reason=recv_obj.finished_reason,
-                    )
-                )
-                continue
-            elif isinstance(recv_obj, UpdateWeightReqOutput):
-                # If it is a weight update request, no detokenization is needed.
                 self.send_to_tokenizer.send_pyobj(recv_obj)
                 continue
-            elif self.tokenizer is None:
-                # If the tokenizer is skipped, no detokenization is needed
-                self.send_to_tokenizer.send_pyobj(recv_obj)
-                continue
+            else:
+                assert isinstance(recv_obj, BatchTokenIDOut)
 
-            assert isinstance(recv_obj, BatchTokenIDOut)
             bs = len(recv_obj.rids)
 
             # Initialize decode status
@@ -122,7 +131,13 @@ class DetokenizerManager:
                     s = self.decode_status[rid]
                     s.decode_ids = recv_obj.decode_ids[i]
 
-                read_ids.append(s.decode_ids[s.surr_offset :])
+                read_ids.append(
+                    self.trim_matched_stop(
+                        s.decode_ids[s.surr_offset :],
+                        recv_obj.finished_reasons[i],
+                        recv_obj.no_stop_trim[i],
+                    )
+                )
                 surr_ids.append(s.decode_ids[s.surr_offset : s.read_offset])
 
             # TODO(lmzheng): handle skip_special_tokens/spaces_between_special_tokens per request
@@ -142,7 +157,7 @@ class DetokenizerManager:
             for i in range(bs):
                 s = self.decode_status[recv_obj.rids[i]]
                 new_text = read_texts[i][len(surr_texts[i]) :]
-                if recv_obj.finished_reason[i] is None:
+                if recv_obj.finished_reasons[i] is None:
                     # Streaming chunk: update the decode status
                     if len(new_text) > 0 and not new_text.endswith("�"):
                         s.decoded_text = s.decoded_text + new_text
@@ -152,20 +167,33 @@ class DetokenizerManager:
                     else:
                         new_text = find_printable_text(new_text)
 
-                output_strs.append(s.decoded_text + new_text)
-
-                # Trim stop str. TODO(lmzheng): handle the case where multiple stop strs are hit
-                if isinstance(recv_obj.finished_reason[i], FINISH_MATCHED_STR):
-                    pos = output_strs[i].find(recv_obj.finished_reason[i].matched)
-                    if pos != -1:
-                        output_strs[i] = output_strs[i][:pos]
+                output_strs.append(
+                    self.trim_matched_stop(
+                        s.decoded_text + new_text,
+                        recv_obj.finished_reasons[i],
+                        recv_obj.no_stop_trim[i],
+                    )
+                )
 
             self.send_to_tokenizer.send_pyobj(
                 BatchStrOut(
                     rids=recv_obj.rids,
+                    finished_reasons=recv_obj.finished_reasons,
                     output_strs=output_strs,
-                    meta_info=recv_obj.meta_info,
-                    finished_reason=recv_obj.finished_reason,
+                    prompt_tokens=recv_obj.prompt_tokens,
+                    origin_input_ids=recv_obj.origin_input_ids,
+                    output_ids=recv_obj.output_ids,
+                    completion_tokens=recv_obj.completion_tokens,
+                    cached_tokens=recv_obj.cached_tokens,
+                    input_token_logprobs_val=recv_obj.input_token_logprobs_val,
+                    input_token_logprobs_idx=recv_obj.input_token_logprobs_idx,
+                    output_token_logprobs_val=recv_obj.output_token_logprobs_val,
+                    output_token_logprobs_idx=recv_obj.output_token_logprobs_idx,
+                    input_top_logprobs_val=recv_obj.input_top_logprobs_val,
+                    input_top_logprobs_idx=recv_obj.input_top_logprobs_idx,
+                    output_top_logprobs_val=recv_obj.output_top_logprobs_val,
+                    output_top_logprobs_idx=recv_obj.output_top_logprobs_idx,
+                    normalized_prompt_logprob=recv_obj.normalized_prompt_logprob,
                 )
             )
 
@@ -187,12 +215,14 @@ def run_detokenizer_process(
     server_args: ServerArgs,
     port_args: PortArgs,
 ):
+    setproctitle.setproctitle("sglang::detokenizer")
     configure_logger(server_args)
+    parent_process = psutil.Process().parent()
 
     try:
         manager = DetokenizerManager(server_args, port_args)
         manager.event_loop()
-    except BaseException:
-        msg = get_exception_traceback()
-        logger.error(msg)
-        kill_parent_process()
+    except Exception:
+        traceback = get_exception_traceback()
+        logger.error(f"DetokenizerManager hit an exception: {traceback}")
+        parent_process.send_signal(signal.SIGQUIT)

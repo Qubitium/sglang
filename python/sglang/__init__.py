@@ -1,6 +1,7 @@
 # SGL API Components
 
 from sglang.api import (
+    Engine,
     Runtime,
     assistant,
     assistant_begin,
@@ -10,7 +11,7 @@ from sglang.api import (
     gen,
     gen_int,
     gen_string,
-    get_server_args,
+    get_server_info,
     image,
     select,
     set_default_backend,
@@ -31,6 +32,7 @@ from sglang.lang.choices import (
 # SGLang DSL APIs
 __all__ = [
     "Runtime",
+    "Engine",
     "assistant",
     "assistant_begin",
     "assistant_end",
@@ -39,7 +41,7 @@ __all__ = [
     "gen",
     "gen_int",
     "gen_string",
-    "get_server_args",
+    "get_server_info",
     "image",
     "select",
     "set_default_backend",
@@ -64,7 +66,7 @@ from sglang.version import __version__
 
 __all__ += ["__version__"]
 
-# SGL Backends
+# SGLang Backends
 from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
 from sglang.utils import LazyImport
 

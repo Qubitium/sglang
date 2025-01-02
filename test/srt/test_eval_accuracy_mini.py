@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from sglang.srt.utils import kill_child_process
+from sglang.srt.utils import kill_process_tree
 from sglang.test.run_eval import run_eval
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST,
@@ -22,7 +22,7 @@ class TestEvalAccuracyMini(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        kill_child_process(cls.process.pid)
+        kill_process_tree(cls.process.pid)
 
     def test_mmlu(self):
         args = SimpleNamespace(
@@ -31,10 +31,11 @@ class TestEvalAccuracyMini(unittest.TestCase):
             eval_name="mmlu",
             num_examples=64,
             num_threads=32,
+            temperature=0.1,
         )
 
         metrics = run_eval(args)
-        assert metrics["score"] >= 0.65
+        self.assertGreaterEqual(metrics["score"], 0.65)
 
 
 if __name__ == "__main__":
