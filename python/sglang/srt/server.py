@@ -461,7 +461,7 @@ def launch_engine(
             gpu_id = server_args.base_gpu_id + tp_rank % tp_size_per_node
             proc = mp.Process(
                 target=run_scheduler_process,
-                args=(server_args, port_args, gpu_id, tp_rank,
+                args=(server_args, port_args, gpu_id, tp_rank, None,
                       router_chan,
                       detokenizer_chan,
                       idle_chan,

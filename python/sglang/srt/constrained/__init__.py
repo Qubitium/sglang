@@ -13,4 +13,4 @@
 # ==============================================================================
 
 # TODO(lmzheng): make this an optional dependency
-from sglang.srt.constrained.outlines_backend import build_regex_from_object
+# from sglang.srt.constrained.outlines_backend import build_regex_from_object

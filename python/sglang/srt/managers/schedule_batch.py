@@ -1257,16 +1257,16 @@ class ModelWorkerBatch:
     # Sampling info
     sampling_info: SamplingBatchInfo
 
+    # lbx add
+    logits_processors: List[List[CustomLogitsProcessor]]
+    previous_tokens: List[int]
+
     # The input Embeds
     input_embeds: Optional[torch.tensor] = None
 
     # Speculative decoding
     spec_info: Optional[SpecInfo] = None
     spec_algorithm: Optional[SpeculativeAlgorithm] = None
-
-    # lbx add
-    logits_processors: List[List[CustomLogitsProcessor]]
-    previous_tokens: List[int]
 
 
 @triton.jit

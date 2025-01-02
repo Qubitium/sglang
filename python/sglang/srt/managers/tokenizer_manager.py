@@ -72,7 +72,6 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.managers.schedule_batch import FINISH_MATCHED_STR
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils import is_generation_model, is_multimodal_model
 from sglang.utils import find_printable_text, get_exception_traceback
 from sglang.srt.managers.detokenizer_manager import LimitedCapacityDict
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
@@ -226,19 +225,11 @@ class TokenizerManager:
                 },
             )
 
-    async def start(self):
-        if self.decoder_task is None:
-            # TODO FIXME make sure sglang loads only the FAST tokenizers which rust based
-            print("tokenizer generate_request decoder loop")
-            self.decoder_task = asyncio.create_task(self.decoder_loop())
-
     async def generate_request(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
         request: Optional[fastapi.Request] = None,
     ):
-        await self.start()
-
         created_time = time.time()
 
         self.auto_create_handle_loop()
@@ -635,7 +626,10 @@ class TokenizerManager:
 
         self.to_create_loop = False
         loop = asyncio.get_event_loop()
-        self.asyncio_tasks.add(loop.create_task(self.handle_loop()))
+        # self.asyncio_tasks.add(loop.create_task(self.handle_loop()))
+        # TODO FIXME make sure sglang loads only the FAST tokenizers which rust based
+        print("tokenizer generate_request decoder loop")
+        self.decoder_task = asyncio.create_task(self.decoder_loop())
 
         signal_handler = SignalHandler(self)
         loop.add_signal_handler(signal.SIGTERM, signal_handler.signal_handler)

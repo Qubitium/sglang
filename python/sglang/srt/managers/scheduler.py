@@ -12,7 +12,8 @@
 # limitations under the License.
 # ==============================================================================
 """A scheduler that manages a tensor parallel GPU worker."""
-
+import asyncio
+import concurrent
 import logging
 import multiprocessing
 import queue
@@ -94,6 +95,8 @@ logger = logging.getLogger(__name__)
 
 # Test retract decode for debugging purposes
 test_retract = get_bool_env_var("SGLANG_TEST_RETRACT")
+
+THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
 
 class Scheduler:
@@ -259,31 +262,32 @@ class Scheduler:
 
         # Init the grammar backend for constrained generation
         self.grammar_queue: List[Req] = []
-        if not server_args.skip_tokenizer_init:
-            if server_args.grammar_backend == "outlines":
-                from sglang.srt.constrained.outlines_backend import (
-                    OutlinesGrammarBackend,
-                )
-
-                self.grammar_backend = OutlinesGrammarBackend(
-                    self.tokenizer,
-                    whitespace_pattern=server_args.constrained_json_whitespace_pattern,
-                    allow_jump_forward=not server_args.disable_jump_forward,
-                )
-            elif server_args.grammar_backend == "xgrammar":
-                from sglang.srt.constrained.xgrammar_backend import (
-                    XGrammarGrammarBackend,
-                )
-
-                self.grammar_backend = XGrammarGrammarBackend(
-                    self.tokenizer, vocab_size=self.model_config.vocab_size
-                )
-            else:
-                raise ValueError(
-                    f"Invalid grammar backend: {server_args.grammar_backend}"
-                )
-        else:
-            self.grammar_backend = None
+        self.grammar_backend = None
+        # if not server_args.skip_tokenizer_init:
+        #     if server_args.grammar_backend == "outlines":
+        #         from sglang.srt.constrained.outlines_backend import (
+        #             OutlinesGrammarBackend,
+        #         )
+        #
+        #         self.grammar_backend = OutlinesGrammarBackend(
+        #             self.tokenizer,
+        #             whitespace_pattern=server_args.constrained_json_whitespace_pattern,
+        #             allow_jump_forward=not server_args.disable_jump_forward,
+        #         )
+        #     elif server_args.grammar_backend == "xgrammar":
+        #         from sglang.srt.constrained.xgrammar_backend import (
+        #             XGrammarGrammarBackend,
+        #         )
+        #
+        #         self.grammar_backend = XGrammarGrammarBackend(
+        #             self.tokenizer, vocab_size=self.model_config.vocab_size
+        #         )
+        #     else:
+        #         raise ValueError(
+        #             f"Invalid grammar backend: {server_args.grammar_backend}"
+        #         )
+        # else:
+        #     self.grammar_backend = None
 
         # Init new token estimation
         assert (
@@ -491,27 +495,23 @@ class Scheduler:
                 self.abort_request(recv_req)
             elif isinstance(recv_req, UpdateWeightFromDiskReqInput):
                 success, message = self.update_weights_from_disk(recv_req)
-                self.send_to_tokenizer.send_pyobj(
-                    UpdateWeightFromDiskReqOutput(success, message)
-                )
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.put_nowait, UpdateWeightFromDiskReqOutput(success, message))
             elif isinstance(recv_req, InitWeightsUpdateGroupReqInput):
                 success, message = self.init_weights_update_group(recv_req)
-                self.send_to_tokenizer.send_pyobj(
-                    InitWeightsUpdateGroupReqOutput(success, message)
-                )
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.put_nowait,
+                                                         InitWeightsUpdateGroupReqOutput(success, message))
             elif isinstance(recv_req, UpdateWeightsFromDistributedReqInput):
                 success, message = self.update_weights_from_distributed(recv_req)
-                self.send_to_tokenizer.send_pyobj(
-                    UpdateWeightsFromDistributedReqOutput(success, message)
-                )
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.put_nowait,
+                                                         UpdateWeightsFromDistributedReqOutput(success, message))
             elif isinstance(recv_req, UpdateWeightsFromTensorReqInput):
                 success, message = self.update_weights_from_tensor(recv_req)
-                self.send_to_tokenizer.send_pyobj(
-                    UpdateWeightsFromTensorReqOutput(success, message)
-                )
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.put_nowait,
+                                                         UpdateWeightsFromTensorReqOutput(success, message))
             elif isinstance(recv_req, GetWeightsByNameReqInput):
                 parameter = self.get_weights_by_name(recv_req)
-                self.send_to_tokenizer.send_pyobj(GetWeightsByNameReqOutput(parameter))
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.put_nowait,
+                                                         GetWeightsByNameReqOutput(parameter))
             elif isinstance(recv_req, ProfileReq):
                 if recv_req == ProfileReq.START_PROFILE:
                     self.start_profile()
@@ -519,9 +519,8 @@ class Scheduler:
                     self.stop_profile()
             elif isinstance(recv_req, OpenSessionReqInput):
                 session_id, success = self.open_session(recv_req)
-                self.send_to_tokenizer.send_pyobj(
-                    OpenSessionReqOutput(session_id=session_id, success=success)
-                )
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.put_nowait,
+                                                         OpenSessionReqOutput(session_id=session_id, success=success))
             elif isinstance(recv_req, CloseSessionReqInput):
                 self.close_session(recv_req)
             else:
@@ -1312,33 +1311,32 @@ class Scheduler:
 
             # Send to detokenizer
             if rids:
-                self.send_to_detokenizer.send_pyobj(
-                    BatchTokenIDOut(
-                        rids,
-                        finished_reasons,
-                        vids,
-                        decoded_texts,
-                        decode_ids_list,
-                        read_offsets,
-                        origin_input_ids,
-                        output_ids,
-                        skip_special_tokens,
-                        spaces_between_special_tokens,
-                        no_stop_trim,
-                        prompt_tokens,
-                        completion_tokens,
-                        cached_tokens,
-                        input_token_logprobs_val,
-                        input_token_logprobs_idx,
-                        output_token_logprobs_val,
-                        output_token_logprobs_idx,
-                        input_top_logprobs_val,
-                        input_top_logprobs_idx,
-                        output_top_logprobs_val,
-                        output_top_logprobs_idx,
-                        normalized_prompt_logprob,
-                    )
-                )
+                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.put_nowait,
+                                                         BatchTokenIDOut(
+                                                             rids,
+                                                             finished_reasons,
+                                                             vids,
+                                                             decoded_texts,
+                                                             decode_ids_list,
+                                                             read_offsets,
+                                                             origin_input_ids,
+                                                             output_ids,
+                                                             skip_special_tokens,
+                                                             spaces_between_special_tokens,
+                                                             no_stop_trim,
+                                                             prompt_tokens,
+                                                             completion_tokens,
+                                                             cached_tokens,
+                                                             input_token_logprobs_val,
+                                                             input_token_logprobs_idx,
+                                                             output_token_logprobs_val,
+                                                             output_token_logprobs_idx,
+                                                             input_top_logprobs_val,
+                                                             input_top_logprobs_idx,
+                                                             output_top_logprobs_val,
+                                                             output_top_logprobs_idx,
+                                                             normalized_prompt_logprob,
+                                                         ))
         else:  # embedding or reward model
             embeddings = []
             prompt_tokens = []
@@ -1348,9 +1346,8 @@ class Scheduler:
                 finished_reasons.append(req.finished_reason.to_json())
                 embeddings.append(req.embedding)
                 prompt_tokens.append(len(req.origin_input_ids))
-            self.send_to_detokenizer.send_pyobj(
-                BatchEmbeddingOut(rids, finished_reasons, embeddings, prompt_tokens)
-            )
+            asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.detokenizer_chan.put_nowait,
+                                                     BatchEmbeddingOut(rids, finished_reasons, embeddings, prompt_tokens))
 
     def prepare_dp_attn_batch(self, local_batch: ScheduleBatch):
         # Check if other DP workers have running batches
@@ -1587,7 +1584,7 @@ def run_scheduler_process(
 
     # Create a scheduler and run the event loop
     try:
-        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, router_chan, detokenizer_chan, idle_chan,)
+        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, dp_rank, router_chan, detokenizer_chan, idle_chan,)
         startup_chan.put_nowait({"status": "ready", "max_total_num_tokens": scheduler.max_total_num_tokens})
         if scheduler.enable_overlap:
             scheduler.event_loop_overlap()
