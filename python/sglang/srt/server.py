@@ -932,8 +932,9 @@ class Runtime:
         self.pid = os.getpid()
 
         new_tokenizer_init_chan = mp.Queue()
-        threading.Thread(target=launch_server, args=[self.server_args, new_tokenizer_init_chan, None,], daemon=True).start()
-
+        # threading.Thread(target=launch_server, args=[self.server_args, new_tokenizer_init_chan, None,], daemon=True).start()
+        # _set_envs_and_config cannot be executed in a child thread.
+        launch_server(self.server_args, new_tokenizer_init_chan, None,)
         tokenizer_init_state = new_tokenizer_init_chan.get()
 
         if tokenizer_init_state == "init ok":

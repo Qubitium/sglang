@@ -799,6 +799,9 @@ class TokenizerManager:
                         "id": rid,
                         "finish_reason": recv_obj.finished_reasons[i],
                         "prompt_tokens": recv_obj.prompt_tokens[i],
+                        "prompt_tokens_ids": recv_obj.origin_input_ids[i],
+                        "completion_tokens": len(recv_obj.output_ids[i]),
+                        "completion_tokens_ids": recv_obj.output_ids[i],
                     }
 
                     if getattr(state.obj, "return_logprob", False):
