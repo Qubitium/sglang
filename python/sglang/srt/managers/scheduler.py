@@ -468,7 +468,7 @@ class Scheduler:
 
         # print(f"model_client.step wait...")
         if len(recv_reqs) > 0:
-            print(f"manager_single Forward Requests batch size: {len(recv_reqs)}")
+            print(f"recv_requests Forward Requests batch size: {len(recv_reqs)}")
 
         return recv_reqs, idle
 

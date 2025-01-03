@@ -225,6 +225,11 @@ class TokenizerManager:
                 },
             )
 
+    def send_one_request(self, tokenized_obj):
+        asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
+        self.pending += 1
+        print(f"send one request PENDING {self.pending}")
+
     async def generate_request(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
@@ -249,7 +254,7 @@ class TokenizerManager:
             is_single = obj.is_single
             if is_single:
                 tokenized_obj = await self._tokenize_one_request(obj)
-                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
+                self.send_one_request(tokenized_obj)
                 async for response in self._wait_one_response(
                     obj, request, created_time
                 ):
@@ -355,12 +360,22 @@ class TokenizerManager:
 
             out = state.out_list[-1]
 
-            # print(f"tokenizer generate request single wait for event done rid: {rid}")
+            # print(f"tokenizer generate request single wait for event done rid: {obj.rid}")
             state.out_list = []
             if state.finished:
                 if self.server_args.log_requests:
                     msg = f"Finish: obj={dataclass_to_string_truncated(obj)}, out={dataclass_to_string_truncated(out)}"
                     logger.info(msg)
+
+                self.pending -= 1
+                assert self.pending >= 0
+                if self.pending == 0:
+                    # print("PENDING state.finished => empty rid_stats! signal!")
+                    asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.idle_chan.put_nowait, [True])
+                else:
+                    pass
+                    # print(f"PENDING size: {self.pending}")
+
                 del self.rid_to_state[obj.rid]
                 yield out
 
@@ -390,7 +405,7 @@ class TokenizerManager:
             for i in range(batch_size):
                 tmp_obj = obj[i]
                 tokenized_obj = await self._tokenize_one_request(tmp_obj)
-                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
+                self.send_one_request(tokenized_obj)
                 generators.append(
                     self._wait_one_response(tmp_obj, request, created_time)
                 )
@@ -418,7 +433,7 @@ class TokenizerManager:
                 tokenized_obj.sampling_params = copy.copy(tokenized_obj.sampling_params)
                 tokenized_obj.sampling_params.max_new_tokens = 0
                 tokenized_obj.stream = False
-                asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
+                self.send_one_request(tokenized_obj)
                 await self._wait_one_response(
                     tmp_obj, request, created_time
                 ).__anext__()
@@ -429,7 +444,7 @@ class TokenizerManager:
                     tmp_obj = copy.copy(objs[i])
                     tokenized_obj = copy.copy(tokenized_objs[i])
                     tokenized_obj.rid = tmp_obj.regenerate_rid()
-                    asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
+                    self.send_one_request(tokenized_obj)
                     generators.append(
                         self._wait_one_response(tmp_obj, request, created_time)
                     )
@@ -679,7 +694,7 @@ class TokenizerManager:
         return output
 
     async def recv_from_detokenizer(self) -> Union[BatchStrOut, BatchEmbeddingOut, BatchTokenIDOut]:
-        # print(f"detokenizer detokenizer_chan get wait...")
+        # print("detokenizer detokenizer_chan get wait...")
         recv_obj_detokenizer: BatchTokenIDOut = await asyncio.get_event_loop().run_in_executor(THREAD_POOL,
                                                                                                self.detokenizer_chan.get)
         if isinstance(recv_obj_detokenizer, BatchEmbeddingOut):
@@ -799,10 +814,11 @@ class TokenizerManager:
                         "id": rid,
                         "finish_reason": recv_obj.finished_reasons[i],
                         "prompt_tokens": recv_obj.prompt_tokens[i],
-                        "prompt_tokens_ids": recv_obj.origin_input_ids[i],
-                        "completion_tokens": len(recv_obj.output_ids[i]),
-                        "completion_tokens_ids": recv_obj.output_ids[i],
+                        # "completion_tokens": len(recv_obj.output_ids[i]),
+                        # "completion_tokens_ids": recv_obj.output_ids[i],
                     }
+                    if isinstance(recv_obj, (BatchStrOut, BatchTokenIDOut)):
+                        meta_info["prompt_tokens_ids"] = recv_obj.origin_input_ids[i]
 
                     if getattr(state.obj, "return_logprob", False):
                         self.convert_logprob_style(
