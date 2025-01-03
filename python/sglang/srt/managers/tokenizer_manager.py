@@ -228,7 +228,7 @@ class TokenizerManager:
     def send_one_request(self, tokenized_obj):
         asyncio.get_event_loop().run_in_executor(THREAD_POOL, self.router_chan.put_nowait, tokenized_obj)
         self.pending += 1
-        print(f"send one request PENDING {self.pending}")
+        # print(f"send one request PENDING {self.pending}")
 
     async def generate_request(
         self,
